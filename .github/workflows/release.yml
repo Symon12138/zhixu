@@ -17,10 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      IMAGE_NAME: ghcr.io/${{ github.repository }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/zhixu
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Lowercase image owner
+        id: img
+        run: echo "name=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -63,9 +67,9 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}
+            ${{ steps.img.outputs.name }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.img.outputs.name }}:latest
           labels: |
             org.opencontainers.image.title=zhixu
             org.opencontainers.image.description=AI 引导式学习工作台
@@ -85,13 +89,13 @@ jobs:
             ## Docker 镜像
 
             ```bash
-            docker pull ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            docker pull ${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}
             ```
 
             `docker-compose.yml` 中设置：
 
             ```
-            ZHIXU_IMAGE=${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            ZHIXU_IMAGE=${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}
             ```
 
             本地开发无需镜像：`npm ci && npm run dev`。
