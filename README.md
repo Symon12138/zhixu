@@ -26,6 +26,30 @@ npm run dev
 
 CI：`.github/workflows/ci.yml` 在 push 到 `main`/`master`、pull request 与手动触发时用 Node.js 22 运行 `npm ci`、`npm run check`、`npm test` 与 `npm run build`，不配置任何真实模型/搜索密钥，也不构建或启动 Docker。**本仓库开发机与 CI 都未实际执行 `docker compose build/up`、certbot 或 nginx**；`Dockerfile`、`docker-compose.yml`、`deploy/nginx.conf` 只有静态一致性测试，首次上线必须在目标主机按 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 第 13 节逐项验证。
 
+## Docker 镜像与版本
+
+打版本 tag（`v*`）会触发 `.github/workflows/release.yml`：跑完整测试与构建后，把镜像推送到 **GitHub Container Registry（ghcr.io）**，并创建对应 GitHub Release。
+
+拉取指定版本（推荐，明确不可变）：
+
+```bash
+docker pull ghcr.io/symon12138/zhixu:1.0.0
+```
+
+`docker-compose.yml` 中把 `ZHIXU_IMAGE` 设为该镜像（禁止 latest 用于生产）：
+
+```
+ZHIXU_IMAGE=ghcr.io/symon12138/zhixu:1.0.0
+```
+
+也可以本地构建，不依赖远端镜像：
+
+```bash
+docker compose build
+```
+
+> 首次发布前 `ghcr.io/symon12138/zhixu` 上还没有镜像；打第一个版本 tag 后由 release 工作流推送。镜像 tag 同时提供 `1.0.0`（版本号）、`v1.0.0`（tag 名）与 `latest`（仅开发用）。
+
 ## 学习方式
 
 首页直接写「想学会什么，或解决什么问题」，基础可选；「学完希望能做什么」可展开补充实际用途，不是必填调查表。开始后，当前任务卡显示期望能力与正在学习的微概念。学习目标随会话保存在本机；服务端生成、评审与自动搜索查询都使用请求中的 `goal`（学习上下文里的 `learningGoal`），入口 `topic` 只是起点。明确切换主线时以当前目标带学，返回原主题时保留原任务。
@@ -155,9 +179,9 @@ AI领学主流程当时的验收为 93 项行为回归、TypeScript 检查与生
 
 无密钥时可以完整学习预置课程；自由问答会提示连接模型，不会用预置文本冒充 AI 回答。真实云端可用性、费用、速度、上下文容量和教学质量取决于供应商及所选模型。
 
-当前本机正式教学模型为 OpenAI 兼容端点 `http://127.0.0.1:3425/v1` 上的 `wb/cn:deepseek-v4.1-flash`，密钥只写在服务端 `.env`。该端点必须从运行 Node 服务的主机可达；Docker/远程部署时应换用容器可访问的地址或同宿主网络，不能把 `127.0.0.1` 当成远端地址。
+模型通过 OpenAI 兼容端点或 Gemini 接入，密钥只写在服务端 `.env`（或开启 BYOK 时由用户保存个人 Key）。该端点必须从运行 Node 服务的主机可达；Docker/远程部署时应换用容器可访问的地址或同宿主网络，不能把 `127.0.0.1` 当成远端地址。
 
-正式模型接入实测：端点探活返回 200；应用真实 `/api/chat` 返回 200。授课模型为 `wb/cn:deepseek-v4.1-flash`，同一本机端点上的 `wb/cn:glm-5.3-flash` 只做独立评审。优化后完整 6 项门禁连续两轮 6/6 通过，0 超时、0 供应商错误；两轮总耗时约 170–193 秒，单个最慢用例 84 秒，低于 150 秒整轮上限。此前 2/6、3/6、5/6 的失败已分别定位为上游超时、评审 JSON/判定不合约、数值错误被误认证，并在不放松门禁的前提下修复。门禁是固定剧本，不能据此宣称所有主题或长期运行都稳定达到目标产品。
+教学质量由固定剧本门禁验证（讲解合约、独立评审、数值正确性、超时与供应商错误处理），门禁不能据此宣称所有主题或长期运行都稳定达到目标产品。
 
 ### 跨学科泛化评测
 

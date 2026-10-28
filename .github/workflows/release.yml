@@ -1,0 +1,97 @@
+name: Release
+
+# 打版本 tag（v*）时：构建并推送镜像到 ghcr.io，并创建 GitHub Release。
+# 不配置任何真实模型/搜索密钥；只构建镜像，不启动、不接触部署环境。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: build image / release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --registry=https://registry.npmjs.org --replace-registry-host=always
+
+      - name: Type check
+        run: npm run check
+
+      - name: Tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=zhixu
+            org.opencontainers.image.description=AI 引导式学习工作台
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## Docker 镜像
+
+            ```bash
+            docker pull ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            ```
+
+            `docker-compose.yml` 中设置：
+
+            ```
+            ZHIXU_IMAGE=${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            ```
+
+            本地开发无需镜像：`npm ci && npm run dev`。
