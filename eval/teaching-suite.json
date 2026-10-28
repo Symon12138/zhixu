@@ -1,0 +1,274 @@
+{
+  "version": 1,
+  "name": "知序教学发布门禁",
+  "description": "针对真实模型的教学回合评测：固定学习剧本 + 程序独立断言结构化状态、题号身份、逐字证据、题型门槛、答案泄露与数值核算。模型自述的 verdict 不作为通过依据。",
+  "defaults": {
+    "topic": "银行理财：现金分红与净值",
+    "level": "从零开始",
+    "goal": "能向客户解释现金分红对单位净值与累计净值的影响，并在新情境中算出正确结果"
+  },
+  "cases": [
+    {
+      "id": "opening-route",
+      "title": "开场建立 3–6 步路线且讲解不泄露答案",
+      "description": "首次开场必须建立可核验的短路线，问题必须绑定当前步骤；公开讲解不得出现待答问题的私有结果。",
+      "covers": ["opening_route", "no_answer_leak"],
+      "turns": [
+        {
+          "action": "start",
+          "learner": "我在银行做理财代销，客户总问分红后净值为什么降了。我想学会解释机制，还能自己算。",
+          "expect": ["route", "question_identity", "no_answer_leak"]
+        }
+      ]
+    },
+    {
+      "id": "first-error-repair",
+      "title": "首错只修复不推进，误区逐字留证",
+      "description": "学习者第一次答错资金流时，导师必须停在原概念、记录具体误区并继续检查，不能借讲解推进到下一概念。",
+      "covers": ["first_error_repair", "no_answer_leak"],
+      "topic": "银行理财：现金分红与净值",
+      "seed": {
+        "goal": "能向客户解释现金分红对单位/累计净值的影响，并在新情境中算出正确结果",
+        "revision": 4,
+        "steps": [
+          { "id": "step-1", "title": "现金分红从产品资产池转出", "mastery": "learning" },
+          { "id": "step-2", "title": "单位净值与累计净值的区别", "mastery": "new" },
+          { "id": "step-3", "title": "在给定数值下核对两种净值", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-cashflow",
+          "stepId": "step-1",
+          "prompt": "现金分红发生时，产品的资产池和客户的现金账户分别发生了什么变化？请用资金流说明。",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["说明现金从产品资产池转出", "说明客户现金账户等额增加"],
+          "scope": "main"
+        },
+        "assumptions": ["本例不考虑税费与份额变化"],
+        "history": [
+          {
+            "role": "assistant",
+            "content": "先看资金流：分红是产品把已实现收益的一部分以现金交给持有人，不是凭空产生的新收益。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "分红是基金公司拿自己的钱补给客户，产品净值其实不用变。",
+          "expect": ["no_advance", "misconception_recorded", "evidence_verbatim", "no_answer_leak", "question_identity"]
+        }
+      ]
+    },
+    {
+      "id": "same-prompt-new-id",
+      "title": "同题换 ID 冒充迁移被拒",
+      "description": "上一题已因同一题干被判错并留下误区；新问题只换了 ID、题干不变。无论模型是否声称“已迁移”，程序都不得把同题重答算作迁移或标记掌握。",
+      "covers": ["same_prompt_new_id"],
+      "topic": "银行理财：现金分红与净值",
+      "seed": {
+        "goal": "能向客户解释现金分红对单位/累计净值的影响，并在新情境中算出正确结果",
+        "revision": 6,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "现金分红与两种净值的机制",
+            "mastery": "understood",
+            "evidence": [
+              {
+                "quote": "现金从产品资产池转出，客户现金等额增加。",
+                "questionId": "q-reason-1",
+                "question": "分红前后，产品资产池和客户现金账户各发生什么变化？",
+                "kind": "reasoning",
+                "turn": 3
+              }
+            ]
+          },
+          { "id": "step-2", "title": "在给定数值下核对两种净值", "mastery": "new" },
+          { "id": "step-3", "title": "把机制用到新的分红场景", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-calc-2",
+          "stepId": "step-1",
+          "prompt": "分红前单位净值与累计净值均为1.10，每份发现金0.05，分红后两种净值分别是多少？",
+          "kind": "transfer",
+          "options": [],
+          "successCriteria": ["单位净值1.05", "累计净值1.10", "说明现金从资产池转出"],
+          "protectedAnswers": ["1.05", "1.10"],
+          "scope": "main"
+        },
+        "misconceptions": [
+          {
+            "id": "m-1",
+            "stepId": "step-1",
+            "questionId": "q-calc-1",
+            "question": "分红前单位净值与累计净值均为1.10，每份发现金0.05，分红后两种净值分别是多少？",
+            "scope": "main",
+            "topic": "现金分红与两种净值的机制",
+            "description": "把分红当成净值的额外增加，未从资产池扣除",
+            "evidenceQuote": "单位净值1.15，累计净值1.10",
+            "status": "repairing"
+          }
+        ],
+        "assumptions": ["本例没有其它价格变动、费用和份额变化"],
+        "history": [
+          {
+            "role": "assistant",
+            "content": "刚才你把分红当成了净值上涨，需要先看现金从产品资产池转出的方向。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "单位净值1.05，累计净值1.10，因为0.05从产品资产池转成了客户现金。",
+          "allowRejection": true,
+          "rejectionCodes": ["not_a_transfer_probe"],
+          "expect": ["no_forged_transfer"]
+        }
+      ]
+    },
+    {
+      "id": "recap-separation",
+      "title": "复盘区分讲过与未核验",
+      "description": "只有讲解、没有任何独立作答证据时，复盘必须明确写出未核验，不能宣称已掌握，也不能改写学习状态或另出练习。",
+      "covers": ["recap_separation"],
+      "topic": "银行理财：现金分红与净值",
+      "seed": {
+        "goal": "能向客户解释现金分红对单位/累计净值的影响，并在新情境中算出正确结果",
+        "revision": 5,
+        "steps": [
+          { "id": "step-1", "title": "现金分红为什么让单位净值下降", "mastery": "learning" },
+          { "id": "step-2", "title": "累计净值为什么把历史现金加回", "mastery": "learning" },
+          { "id": "step-3", "title": "在给定数值下核对两种净值", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-explain-1",
+          "stepId": "step-1",
+          "prompt": "用你自己的话说清：分红后单位净值和累计净值为什么变化方向不同？",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["单位净值扣除已付出的现金", "累计净值把历史现金加回"],
+          "scope": "main"
+        },
+        "history": [
+          { "role": "user", "content": "分红到底是不是额外的收益？" },
+          {
+            "role": "assistant",
+            "content": "不是。分红是把产品已经实现的收益以现金交给持有人。单位净值要扣掉这笔现金，所以下降；累计净值把历史分出去的现金加回，所以不因分红而减少。"
+          },
+          { "role": "user", "content": "我大概懂了，就是钱从产品里拿出来。" },
+          {
+            "role": "assistant",
+            "content": "对，方向是产品资产池转出到客户现金账户。还需要你能说清累计净值为什么把现金加回。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "summary",
+          "learner": "",
+          "expect": ["recap_separation", "state_unchanged", "no_answer_leak"]
+        }
+      ]
+    },
+    {
+      "id": "choice-is-not-reasoning",
+      "title": "选择题不得冒充推理或迁移",
+      "description": "只选中一个选项最多是辨认（recognition），不能当成解释原理或迁移应用，也不能据此把步骤标为已理解或已应用。",
+      "covers": ["choice_not_reasoning"],
+      "topic": "银行理财：现金分红与净值",
+      "seed": {
+        "goal": "能向客户解释现金分红对单位/累计净值的影响，并在新情境中算出正确结果",
+        "revision": 3,
+        "steps": [
+          { "id": "step-1", "title": "分红现金从哪里来", "mastery": "learning" },
+          { "id": "step-2", "title": "两种净值的差别", "mastery": "new" },
+          { "id": "step-3", "title": "在新条件下核对", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-choice-1",
+          "stepId": "step-1",
+          "prompt": "现金分红支付给客户的现金，最直接来自哪里？",
+          "kind": "choice",
+          "options": ["产品资产池中已实现的收益", "基金公司用自有资金垫付", "客户自己多缴的申购款"],
+          "successCriteria": ["能辨认现金来源，不要求解释机制"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "分红是产品把已有资产中的一部分以现金交给持有人。先辨认这笔现金最直接的来源，再讨论净值。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "1",
+          "allowRejection": true,
+          "rejectionCodes": ["choice_is_not_reasoning"],
+          "expect": ["choice_not_reasoning", "evidence_verbatim", "no_answer_leak", "question_identity"]
+        }
+      ]
+    },
+    {
+      "id": "numeric-error",
+      "title": "数值错误被拦截，不认证掌握",
+      "description": "学习者公式方向听起来对但算错最终数值。程序按独立数值预期核对，模型不得判为正确、不得记为推理证据，也不得在讲解中直接公布正确结果。",
+      "covers": ["numeric_error", "no_answer_leak"],
+      "topic": "银行理财：现金分红与净值",
+      "groundTruth": { "numbers": ["1.05", "1.10"] },
+      "seed": {
+        "goal": "能向客户解释现金分红对单位/累计净值的影响，并在新情境中算出正确结果",
+        "revision": 7,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "现金分红与两种净值",
+            "mastery": "understood",
+            "evidence": [
+              {
+                "quote": "现金从产品资产池转出，客户现金等额增加。",
+                "questionId": "q-reason-2",
+                "question": "现金分红后，产品资产池和客户现金账户各发生什么变化？",
+                "kind": "reasoning",
+                "turn": 4
+              }
+            ]
+          },
+          { "id": "step-2", "title": "在给定数值下核对两种净值", "mastery": "learning" },
+          { "id": "step-3", "title": "把机制用到新的分红场景", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-calc-3",
+          "stepId": "step-1",
+          "prompt": "没有其它价格变动和费用：分红前单位净值与累计净值都是1.10，每份发现金0.05。分红后单位净值和累计净值分别是多少？",
+          "kind": "calculation",
+          "options": [],
+          "successCriteria": ["单位净值1.05", "累计净值1.10", "说明这笔现金从资产池转出"],
+          "protectedAnswers": ["1.05", "1.10"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "先看法则：分红是把产品里的现金交给持有人，单位净值要扣掉这笔现金，累计净值把历史现金加回。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "单位净值=1.10−0.05=1.02，累计净值=1.10+0.05=1.15。",
+          "expect": ["numeric_gate", "no_answer_leak", "no_advance", "misconception_recorded", "evidence_verbatim", "question_identity"]
+        }
+      ]
+    }
+  ]
+}

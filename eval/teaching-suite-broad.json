@@ -1,0 +1,470 @@
+{
+  "version": 1,
+  "name": "知序跨学科教学泛化评测",
+  "description": "跨数学、编程、物理、英语、生物、经济与历史主题的真实模型评测。程序独立核对路线、题号、逐字证据、数值闸门、选择题边界、复盘与学习状态；模型自述 verdict 不作为通过依据。",
+  "defaults": {
+    "topic": "跨学科学习",
+    "level": "从零开始",
+    "goal": "能理解核心概念并用它解决一个新问题"
+  },
+  "cases": [
+    {
+      "id": "math-opening-route",
+      "title": "数学开场建立可核验路线",
+      "description": "一元二次方程主题首次开场：路线必须有 3–6 步，问题绑定当前步骤，公开讲解不泄露新题答案。",
+      "covers": ["opening_route", "no_answer_leak"],
+      "topic": "一元二次方程",
+      "level": "从零开始",
+      "goal": "能判断一元二次方程是否有实根，并用因式分解或求根公式解出根",
+      "turns": [
+        {
+          "action": "start",
+          "learner": "我想学会解一元二次方程，先搞懂判别式，再能自己算出根，不想只背公式。",
+          "expect": ["route", "question_identity", "no_answer_leak"]
+        }
+      ]
+    },
+    {
+      "id": "python-first-error",
+      "title": "Python 首错停在原概念并记录误区",
+      "description": "学习者把 range 的终点当成包含值。导师应停在起点/终点规则，记录本轮错误，不得推进到列表索引或循环累加。",
+      "covers": ["first_error_repair", "no_answer_leak"],
+      "topic": "Python 循环与索引",
+      "level": "有一些基础",
+      "goal": "能解释 range 的起点与终点规则，并用循环正确累加列表元素",
+      "seed": {
+        "goal": "能解释 range 的起点与终点规则，并用循环正确累加列表元素",
+        "revision": 3,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "range 的起点、终点与步长",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "列表索引从 0 开始",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "用循环累加列表元素",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-range",
+          "stepId": "step-1",
+          "prompt": "在 Python 中，range(1, 5) 会依次产生哪些整数？请说明起点和终点规则。",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["起点 1 包含", "终点 5 不包含", "依次得到 1、2、3、4"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "先区分 range 的起点和终点。range 的终点通常不包含，但不要直接背结论，先用一个小范围验证。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "range(1,5) 会从 1 数到 5，所以是 1、2、3、4、5。",
+          "expect": [
+            "no_advance",
+            "misconception_recorded",
+            "evidence_verbatim",
+            "no_answer_leak",
+            "question_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "physics-numeric-error",
+      "title": "物理速度计算错误被闸门拦截",
+      "description": "学习者把速度公式用成乘法。程序独立核算数值，不能判正确、不能记推理证据，也不能泄露正确速度。",
+      "covers": ["numeric_error", "no_answer_leak"],
+      "topic": "速度、路程与时间",
+      "level": "从零开始",
+      "goal": "能用速度=路程÷时间解决匀速运动问题，并检查单位",
+      "groundTruth": { "numbers": ["12.5"] },
+      "seed": {
+        "goal": "能用速度=路程÷时间解决匀速运动问题，并检查单位",
+        "revision": 4,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "速度、路程与时间的关系",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "单位换算与结果检查",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "用速度公式解决新情境",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-speed-1",
+          "stepId": "step-1",
+          "prompt": "一辆车 8 秒内匀速通过 100 米，它的速度是多少米/秒？请写出关系和结果。",
+          "kind": "calculation",
+          "options": [],
+          "successCriteria": ["使用速度=路程÷时间", "结果为 12.5 米/秒"],
+          "protectedAnswers": ["12.5"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "速度描述单位时间内通过的路程。先判断应该用乘法还是除法，再检查单位。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "速度 = 100 × 8 = 800 米/秒。",
+          "expect": [
+            "numeric_gate",
+            "no_answer_leak",
+            "no_advance",
+            "misconception_recorded",
+            "evidence_verbatim",
+            "question_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "physics-numeric-correct",
+      "title": "物理正确数值被接受",
+      "description": "同一个物理计算题给出正确结果。数值闸门应放行，掌握判定和证据仍由结构化状态核验。",
+      "covers": ["numeric_error", "no_answer_leak"],
+      "topic": "速度、路程与时间",
+      "level": "从零开始",
+      "goal": "能用速度=路程÷时间解决匀速运动问题，并检查单位",
+      "groundTruth": { "numbers": ["12.5"] },
+      "seed": {
+        "goal": "能用速度=路程÷时间解决匀速运动问题，并检查单位",
+        "revision": 4,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "速度、路程与时间的关系",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "单位换算与结果检查",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "用速度公式解决新情境",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-speed-2",
+          "stepId": "step-1",
+          "prompt": "一辆车 8 秒内匀速通过 100 米，它的速度是多少米/秒？请写出关系和结果。",
+          "kind": "calculation",
+          "options": [],
+          "successCriteria": ["使用速度=路程÷时间", "结果为 12.5 米/秒"],
+          "protectedAnswers": ["12.5"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "速度描述单位时间内通过的路程。先判断应该用乘法还是除法，再检查单位。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "速度 = 路程 ÷ 时间 = 100 ÷ 8 = 12.5 米/秒。",
+          "expect": [
+            "numeric_gate",
+            "no_answer_leak",
+            "evidence_verbatim",
+            "question_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "english-choice",
+      "title": "英语选择题只认证辨认",
+      "description": "一般现在时第三人称单数选择题。选对选项最多是辨认，不能当成解释规则或迁移应用。",
+      "covers": ["choice_not_reasoning", "no_answer_leak"],
+      "topic": "英语一般现在时",
+      "level": "从零开始",
+      "goal": "能选择正确的第三人称单数动词，并说明一般现在时的选择依据",
+      "seed": {
+        "goal": "能选择正确的第三人称单数动词，并说明一般现在时的选择依据",
+        "revision": 3,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "第三人称单数的动词形式",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "一般现在时的使用场景",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "在新句子中选择并解释",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-english-choice",
+          "stepId": "step-1",
+          "prompt": "选择正确句子：She ___ to school every day.",
+          "kind": "choice",
+          "options": ["go", "goes", "going"],
+          "successCriteria": ["第三人称单数使用 goes", "选择第 2 个选项"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "先看主语的人称和数，再判断一般现在时里动词需要什么形式。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "2",
+          "expect": [
+            "choice_not_reasoning",
+            "evidence_verbatim",
+            "no_answer_leak",
+            "question_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "biology-summary",
+      "title": "生物复盘区分讲过与未核验",
+      "description": "光合作用只有讲解、没有独立作答证据时，复盘必须明确未核验，不能改写路线或另出练习。",
+      "covers": ["recap_separation"],
+      "topic": "光合作用",
+      "level": "从零开始",
+      "goal": "能解释光反应与碳反应的能量和物质变化，并把它们联系起来",
+      "seed": {
+        "goal": "能解释光反应与碳反应的能量和物质变化，并把它们联系起来",
+        "revision": 5,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "光反应如何吸收光能",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "碳反应如何固定二氧化碳",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-3",
+            "title": "两个阶段如何衔接",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-biology-explain",
+          "stepId": "step-1",
+          "prompt": "用你自己的话说清：光反应产生的能量和物质，怎样供碳反应使用？",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["光反应产生 ATP 和 NADPH", "碳反应利用它们固定二氧化碳"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "user",
+            "content": "光合作用是不是只有一步？"
+          },
+          {
+            "role": "assistant",
+            "content": "不是。光反应先利用光能产生 ATP 和 NADPH，碳反应再利用它们固定二氧化碳。两个阶段通过能量和还原力衔接。"
+          },
+          {
+            "role": "user",
+            "content": "我大概知道有两个阶段了。"
+          },
+          {
+            "role": "assistant",
+            "content": "还需要你能说清 ATP 和 NADPH 如何从光反应进入碳反应。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "summary",
+          "learner": "",
+          "expect": ["recap_separation", "state_unchanged", "no_answer_leak"]
+        }
+      ]
+    },
+    {
+      "id": "economics-misconception",
+      "title": "经济错误前提被当作作答而非质疑",
+      "description": "学习者把“通胀等于所有商品涨价、购买力不会下降”当成事实陈述。导师应直接纠正并记录误区，不推进到实际收入计算。",
+      "covers": ["first_error_repair", "no_answer_leak"],
+      "topic": "通货膨胀与购买力",
+      "level": "从零开始",
+      "goal": "能解释通货膨胀如何影响名义收入和实际购买力，并计算简单的购买力变化",
+      "seed": {
+        "goal": "能解释通货膨胀如何影响名义收入和实际购买力，并计算简单的购买力变化",
+        "revision": 3,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "通货膨胀与价格水平",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "名义收入与实际购买力",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "在给定通胀率下核对购买力",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-econ-reason",
+          "stepId": "step-1",
+          "prompt": "通货膨胀率上升、名义收入不变时，同样的钱能买到的东西会怎样变化？请说明方向。",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["价格水平上升", "同样收入能买到的东西减少", "实际购买力下降"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "通胀描述整体价格水平的持续上升，不等于每一种商品都同幅涨价。先看同样的名义收入能买到多少东西。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "通胀就是所有商品都涨价，所以购买力不会下降。",
+          "expect": [
+            "no_advance",
+            "misconception_recorded",
+            "evidence_verbatim",
+            "no_answer_leak",
+            "question_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "history-opening-route",
+      "title": "历史开场区分导火索与深层原因",
+      "description": "工业革命主题首次开场：路线要覆盖多个解释维度，问题绑定当前步骤，不把历史讲成单一年份或单一发明。",
+      "covers": ["opening_route", "no_answer_leak"],
+      "topic": "工业革命为什么先发生在英国",
+      "level": "从零开始",
+      "goal": "能从资本、劳动力、市场、资源与技术等条件解释工业革命为何首先发生在英国，而不只背年份",
+      "turns": [
+        {
+          "action": "start",
+          "learner": "我想理解工业革命为什么先发生在英国，不想只背年份和发明清单。",
+          "expect": ["route", "question_identity", "no_answer_leak"]
+        }
+      ]
+    },
+    {
+      "id": "python-detour-return",
+      "title": "编程插问保存返回点并恢复原题",
+      "description": "范围题学习中插入一个明确的题外问题（地球四季），再明确回到 range 题。检查插问是否保存原步骤与原题、恢复后是否回到原题号，以及恢复后的真实作答。",
+      "covers": ["detour_return", "no_answer_leak"],
+      "topic": "Python 循环与索引",
+      "level": "有一些基础",
+      "goal": "能解释 range 的起点与终点规则，并理解列表索引从 0 开始",
+      "seed": {
+        "goal": "能解释 range 的起点与终点规则，并理解列表索引从 0 开始",
+        "revision": 4,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "range 的起点、终点与步长",
+            "mastery": "learning"
+          },
+          {
+            "id": "step-2",
+            "title": "列表索引从 0 开始",
+            "mastery": "new"
+          },
+          {
+            "id": "step-3",
+            "title": "用循环累加列表元素",
+            "mastery": "new"
+          }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-range-detour",
+          "stepId": "step-1",
+          "prompt": "在 Python 中，range(1, 5) 会依次产生哪些整数？请说明起点和终点规则。",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["起点 1 包含", "终点 5 不包含", "依次得到 1、2、3、4"],
+          "scope": "main"
+        },
+        "history": [
+          {
+            "role": "assistant",
+            "content": "先区分 range 的起点和终点。终点通常不包含，但先用小范围验证，不要只背结论。"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "message",
+          "learner": "另外问一个题外问题：地球为什么会有四季？",
+          "expect": ["detour_preserved", "question_identity", "no_answer_leak"]
+        },
+        {
+          "action": "resume",
+          "learner": "回到刚才 range(1,5) 的问题。",
+          "expect": ["resume_returned", "question_identity", "no_answer_leak"]
+        },
+        {
+          "action": "message",
+          "learner": "range(1,5) 包含起点 1，但不包含终点 5，所以依次是 1、2、3、4。",
+          "expect": ["evidence_verbatim", "no_answer_leak", "question_identity"]
+        }
+      ]
+    }
+  ]
+}

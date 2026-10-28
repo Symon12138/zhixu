@@ -1,0 +1,100 @@
+# 知序单节点部署：应用 + nginx（TLS 终结）+ 可选 certbot（profile: tls）。
+#
+# 应用镜像 tag 来自 ZHIXU_IMAGE，必须是明确版本，禁止使用 latest。
+# 升级/回滚只需改变量后执行 docker compose up -d --no-build zhixu。
+# 首次签发证书见 docs/OPERATIONS.md 第 3 节或 deploy/tls-bootstrap.sh。
+
+services:
+  zhixu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${ZHIXU_IMAGE:?ZHIXU_IMAGE must be an explicit immutable version, not latest}
+    container_name: zhixu
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    # 应用收到 SIGTERM 后最多再等 5 秒；留出清理和排空时间。
+    stop_grace_period: 25s
+    env_file:
+      - .env
+    environment:
+      # 监听容器内网卡，供 nginx 容器访问；不发布端口，公网入口只走 nginx。
+      ZHIXU_HOST: 0.0.0.0
+      ZHIXU_PORT: "3001"
+      ZHIXU_DATA_DIR: /data
+      # nginx 与 Node 分属两个容器：信任一层代理以取得真实客户端来源。
+      ZHIXU_TRUST_PROXY: "true"
+    expose:
+      - "3001"
+    volumes:
+      - zhixu-data:/data
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # 不写 ports:，公网入口只走 nginx。
+
+  nginx:
+    # 固定次版本，避免 :latest 漂移；需要补丁升级时改这一行并重新验证。
+    image: nginx:1.27-alpine
+    container_name: zhixu-nginx
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    depends_on:
+      zhixu:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/security-headers.conf:/etc/nginx/security-headers.conf:ro
+      - ./deploy/50x.html:/usr/share/nginx/html/50x.html:ro
+      # certbot 的 --config-dir=/etc/letsencrypt（compose 默认）落盘在宿主机 deploy/certs。
+      # nginx 直接读同一个目录下的 live/zhixu/{fullchain,privkey}.pem，文件名与 nginx.conf 一致。
+      - ./deploy/certs:/etc/letsencrypt:ro
+      # HTTP-01 webroot；首次 standalone 签发后，续期由 certbot 写入、nginx 读取。
+      - ./deploy/certbot:/var/www/certbot:ro
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # 可选 profile：默认 docker compose up 不会启动 certbot，避免与 nginx 抢 80 端口。
+  # 首次签发（standalone）必须只启动应用，见 deploy/tls-bootstrap.sh：
+  #   docker compose --profile tls run --rm --service-ports certbot certonly --standalone ...
+  # 续期（webroot）不需要发布端口，见 deploy/tls-renew.sh。
+  certbot:
+    image: certbot/certbot:v3.1.0
+    container_name: zhixu-certbot
+    profiles:
+      - tls
+    restart: "no"
+    stop_grace_period: 15s
+    # 只在 `run --service-ports`（首次 standalone 签发）时发布 80；
+    # 普通 `run certbot renew ...` 不发布端口，因此不会和运行中的 nginx 冲突。
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/certs:/etc/letsencrypt
+      - ./deploy/certbot:/var/www/certbot
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  zhixu-data:
+
+networks:
+  internal:
+    driver: bridge

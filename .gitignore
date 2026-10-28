@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.data/
+.e2e-*/
+deploy/certs/
+deploy/certbot/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+
+# 本地工具缓存与残留
+.npm/
+dev/null
+.tmp-*.png
+.tmp-*.log
+
+# 本地子代理配置（不随开源发布）
+.omp/

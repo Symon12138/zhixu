@@ -1,0 +1,669 @@
+/* ── 学习进度与教学回执（LearningProgress.tsx）──────────────────────────
+   纸感松绿，与 .learning-path / .chat-message 保持同一家族：小字号、柔和边框、
+   语义化按钮、4.5:1 对比。桌面出现在 .study-rail 内，手机折叠出现在课程列表下。 */
+
+.lp-root {
+  display: grid;
+  gap: 16px;
+}
+
+/* 待答问题 */
+.lp-pending {
+  background: #f3f6ed;
+  border: 1px solid #e0e8d5;
+  border-radius: 11px;
+  padding: 13px 14px;
+}
+.lp-pending-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.lp-qkind {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: #587346;
+  background: #e2ebd8;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-weight: 500;
+}
+.lp-qkind.orientation {
+  color: #6b5c3a;
+  background: #f4eddd;
+}
+.lp-pending-head small {
+  font-size: 10px;
+  color: #66745f;
+}
+.lp-pending-prompt {
+  margin-top: 9px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: #3d4c3c;
+}
+.lp-pending-hint,
+.lp-scope {
+  display: block;
+  margin-top: 8px;
+  font-size: 10px;
+  line-height: 1.7;
+  color: #66745f;
+}
+.lp-scope {
+  color: #6b5c3a;
+}
+.lp-options {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+.lp-options > button {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  text-align: left;
+  width: 100%;
+  border: 1px solid #dde5d2;
+  border-radius: 9px;
+  background: #fbfcf8;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #465c37;
+}
+.lp-options > button > span:first-child {
+  font-size: 9px;
+  color: #66745f;
+  border: 1px solid #d5decb;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.lp-options > button:hover:not(:disabled) {
+  border-color: #b8c9a4;
+  background: #f3f6ed;
+}
+
+/* 路线与证据 */
+.lp-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+.lp-step-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px 8px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fbfcf8;
+  padding: 8px 10px;
+}
+.lp-step-row:hover {
+  border-color: #ccd8bd;
+}
+.lp-step-row small {
+  grid-row: 1;
+  grid-column: 2;
+  padding-right: 15px;
+  font-size: 10px;
+  color: #66745f;
+  white-space: nowrap;
+}
+.lp-step-row > svg {
+  position: absolute;
+  right: 9px;
+  top: 12px;
+  color: #a4ae99;
+  transition: transform 160ms ease;
+}
+.lp-step-row > svg.open {
+  transform: rotate(180deg);
+}
+.lp-step-title {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  font-size: 12.5px;
+  color: #4f6550;
+  line-height: 1.5;
+  min-width: 0;
+}
+.lp-step-title em {
+  font-style: normal;
+  font-size: 9px;
+  color: #587346;
+  background: #e2ebd8;
+  border-radius: 5px;
+  padding: 1px 5px;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+li.current > .lp-step-row {
+  border-color: #ccd8bd;
+  background: #f3f6ed;
+}
+li.current > .lp-step-row .lp-step-title {
+  color: #3f5a41;
+}
+.lp-mastery {
+  grid-row: 1;
+  grid-column: 1;
+  justify-self: start;
+  font-size: 9px;
+  border-radius: 6px;
+  padding: 2px 7px;
+  flex-shrink: 0;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.lp-mastery.new {
+  color: #66745f;
+  background: #eef0e8;
+}
+.lp-mastery.learning {
+  color: #6b5c3a;
+  background: #f4eddd;
+}
+.lp-mastery.understood {
+  color: #587346;
+  background: #e2ebd8;
+}
+.lp-mastery.applied {
+  color: #4d6a7d;
+  background: #e3edf3;
+}
+.lp-evidence-list {
+  margin: 6px 2px 0;
+  padding: 9px 11px;
+  border-left: 2px solid #dfe6d5;
+  font-size: 11px;
+}
+.lp-evidence-list p {
+  color: #66745f;
+  line-height: 1.8;
+}
+.lp-evidence-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 9px;
+}
+.lp-evidence blockquote {
+  margin: 0;
+  display: flex;
+  gap: 5px;
+  align-items: start;
+  color: #465c37;
+  line-height: 1.7;
+}
+.lp-evidence blockquote svg {
+  margin-top: 3px;
+  color: #a7b896;
+}
+.lp-evidence small {
+  display: block;
+  margin-top: 3px;
+  color: #66745f;
+  font-size: 9.5px;
+  line-height: 1.6;
+}
+
+/* 误区 */
+.lp-misconceptions {
+  border: 1px solid #ecd9d2;
+  background: #faf3ef;
+  border-radius: 11px;
+  padding: 12px 13px;
+}
+.lp-misconceptions h4,
+.lp-detour h4,
+.lp-tracks h4,
+.lp-deferred h4 {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.lp-misconceptions h4 {
+  color: #9a5a4b;
+}
+.lp-misconceptions ul {
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.lp-misconceptions strong {
+  font-size: 11px;
+  color: #7d4a3e;
+}
+.lp-misconceptions p {
+  font-size: 11px;
+  line-height: 1.7;
+  color: #6d564d;
+  margin-top: 3px;
+}
+.lp-misconceptions blockquote {
+  margin: 4px 0 0;
+  font-size: 10.5px;
+  color: #8a6a5d;
+  border-left: 2px solid #e3c9bd;
+  padding-left: 7px;
+  line-height: 1.7;
+}
+.lp-misconceptions small {
+  display: block;
+  margin-top: 3px;
+  font-size: 9.5px;
+  color: #805f55;
+  line-height: 1.6;
+}
+
+/* 插问与暂停主线 */
+.lp-detour {
+  border: 1px solid #e7dcc4;
+  background: #faf6ec;
+  border-radius: 11px;
+  padding: 12px 13px;
+}
+.lp-detour h4 {
+  color: #6b5c3a;
+}
+.lp-detour p {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: #7d7154;
+  margin: 7px 0 9px;
+}
+.lp-resume,
+.lp-tracks > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #cdd9bc;
+  border-radius: 8px;
+  background: #f3f6ed;
+  color: #4d6a40;
+  font-size: 11px;
+  padding: 7px 12px;
+  font-weight: 500;
+}
+.lp-resume:hover:not(:disabled),
+.lp-tracks > button:hover:not(:disabled) {
+  background: #e6eddc;
+  border-color: #b8c9a4;
+}
+.lp-tracks {
+  display: grid;
+  gap: 8px;
+}
+.lp-tracks h4 {
+  color: #596b4b;
+}
+.lp-tracks > button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+}
+.lp-tracks > button span {
+  font-size: 11.5px;
+  color: #4f6550;
+  min-width: 0;
+  line-height: 1.5;
+}
+.lp-tracks > button small {
+  font-size: 9.5px;
+  color: #66745f;
+  white-space: nowrap;
+}
+.lp-deferred h4 {
+  color: #596b4b;
+  font-size: 10px;
+}
+.lp-deferred-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.lp-deferred-chips span {
+  font-size: 9.5px;
+  color: #66745f;
+  background: #eef0e8;
+  border-radius: 6px;
+  padding: 2px 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 助手消息下的教学回执 */
+.teaching-receipt {
+  margin-top: 10px;
+  margin-left: 33px;
+  display: grid;
+  gap: 9px;
+  font-size: 11px;
+}
+.receipt-verdict {
+  border: 1px solid #dde5d2;
+  border-radius: 9px;
+  background: #f7f9f2;
+  padding: 9px 12px;
+}
+.receipt-verdict.incorrect {
+  border-color: #ecd9d2;
+  background: #faf3ef;
+}
+.receipt-verdict.partial,
+.receipt-verdict.uncertain {
+  border-color: #e7dcc4;
+  background: #faf6ec;
+}
+.receipt-verdict.correct {
+  border-color: #ccd8bd;
+  background: #f3f6ed;
+}
+.receipt-verdict strong {
+  font-size: 11.5px;
+  color: #4f6550;
+}
+.receipt-verdict.incorrect strong {
+  color: #9a5a4b;
+}
+.receipt-verdict.partial strong,
+.receipt-verdict.uncertain strong {
+  color: #6b5c3a;
+}
+.receipt-verdict blockquote {
+  margin: 5px 0 0;
+  color: #6d7a63;
+  border-left: 2px solid #d5decb;
+  padding-left: 7px;
+  line-height: 1.7;
+  font-size: 10.5px;
+}
+.receipt-verdict p {
+  margin-top: 4px;
+  color: #66745f;
+  line-height: 1.7;
+}
+.receipt-retracted,
+.receipt-assumptions,
+.receipt-sources {
+  border: 1px solid #e7dcc4;
+  border-radius: 9px;
+  background: #faf6ec;
+  padding: 9px 12px;
+}
+.receipt-assumptions {
+  border-color: var(--border);
+  background: #fbfcf8;
+}
+.receipt-retracted h5,
+.receipt-assumptions h5,
+.receipt-sources h5 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #6b5c3a;
+}
+.receipt-retracted h5 {
+  color: #9a5a4b;
+}
+.receipt-assumptions h5 {
+  color: #596b4b;
+}
+.receipt-retracted ul,
+.receipt-assumptions ul {
+  margin: 6px 0 0;
+  padding-left: 17px;
+  line-height: 1.8;
+  color: #6d6a58;
+}
+.receipt-retracted ul {
+  color: #7d6256;
+}
+.receipt-retracted p {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #805f55;
+  line-height: 1.7;
+}
+.receipt-source + .receipt-source {
+  margin-top: 7px;
+}
+.receipt-source strong {
+  font-size: 10px;
+  color: #596b4b;
+}
+.receipt-source blockquote {
+  margin: 3px 0 0;
+  border-left: 2px solid #d5decb;
+  padding-left: 7px;
+  color: #6d7a63;
+  line-height: 1.7;
+  font-size: 10.5px;
+}
+.receipt-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  text-decoration: none;
+}
+.receipt-source-meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.quality-badge {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #587346;
+  background: #eef3e6;
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-weight: 500;
+}
+.quality-badge:hover {
+  background: #e2ebd8;
+}
+.quality-badge > svg {
+  color: #587346;
+  transition: transform 160ms ease;
+}
+.quality-badge > svg.open {
+  transform: rotate(180deg);
+}
+.quality-details {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fbfcf8;
+  padding: 9px 12px;
+  display: grid;
+  gap: 6px;
+}
+.quality-details p,
+.quality-details li {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: #66745f;
+}
+.quality-details ul {
+  margin: 0;
+  padding-left: 17px;
+}
+.quality-limit {
+  color: #66745f !important;
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+}
+
+/* 手机：折叠入口（study-rail 在 <=1100 隐藏，这里给出等价面板） */
+.mobile-progress {
+  display: none;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: #f3f6ed;
+  margin: 0 0 4px;
+}
+.mobile-progress > summary {
+  display: flex;
+  list-style: none;
+  cursor: pointer;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 11px 14px;
+  font-size: 12px;
+  color: #4f6550;
+  font-weight: 500;
+}
+.mobile-progress > summary > svg {
+  color: #587346;
+}
+.mobile-progress > summary > svg:last-child {
+  margin-left: 2px;
+  transition: transform 160ms ease;
+}
+.mobile-progress[open] > summary > svg:last-child {
+  transform: rotate(180deg);
+}
+.mobile-progress-body {
+  padding: 2px 14px 14px;
+  border-top: 1px solid #e0e8d5;
+}
+
+@media (max-width: 600px) {
+  .teaching-receipt {
+    margin-left: 0;
+  }
+  .lp-options > button {
+    min-height: 44px;
+  }
+  .lp-resume,
+  .lp-tracks > button {
+    min-height: 44px;
+  }
+}
+
+.mobile-progress > summary::-webkit-details-marker {
+  display: none;
+}
+.learning-path > .lp-root {
+  margin-top: 16px;
+}
+.lp-followup {
+  margin-top: 18px;
+}
+.focus-mode .mobile-progress {
+  display: block;
+  margin-top: 18px;
+}
+.lp-legacy {
+  margin-top: 14px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--muted);
+}
+.lp-question-recall {
+  margin-top: 9px;
+}
+.lp-question-recall > summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 11px;
+  padding: 5px 0;
+}
+@media (max-width: 600px) {
+  .lp-question-recall > summary {
+    min-height: 28px;
+    font-size: 12px;
+  }
+}
+.lp-legacy summary,
+.lp-deferred > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--primary);
+  padding: 5px 0;
+}
+.lp-legacy ol {
+  padding-left: 20px;
+}
+.lp-options.compact {
+  display: flex;
+  flex-wrap: wrap;
+}
+.lp-options.compact > button {
+  width: 40px;
+  min-height: 40px;
+  justify-content: center;
+  padding: 6px;
+}
+@media (max-width: 1100px) {
+  .mobile-progress {
+    display: block;
+    margin-top: 18px;
+  }
+}
+@media (max-width: 600px) {
+  .lp-options.compact > button {
+    width: 44px;
+    min-height: 44px;
+  }
+  .lp-step-title {
+    font-size: 13px;
+  }
+  .lp-pending-prompt {
+    font-size: 14px;
+  }
+  .lp-evidence-list {
+    font-size: 13px;
+  }
+  .quality-details p,
+  .quality-details li {
+    font-size: 12px;
+  }
+  .teaching-receipt {
+    font-size: 13px;
+  }
+  .receipt-verdict strong {
+    font-size: 13px;
+  }
+  .receipt-verdict blockquote {
+    font-size: 12px;
+  }
+}

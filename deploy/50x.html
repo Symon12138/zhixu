@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>知序 · 服务维护中</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #f6f7f9;
+        color: #1f2937;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main {
+        width: min(34rem, calc(100% - 3rem));
+        padding: 2.5rem;
+        border-radius: 1rem;
+        background: #fff;
+        box-shadow: 0 12px 40px rgb(15 23 42 / 8%);
+      }
+      h1 { margin: 0 0 0.75rem; font-size: 1.4rem; }
+      p { margin: 0.5rem 0; line-height: 1.7; color: #475569; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #0f172a; color: #e2e8f0; }
+        main { background: #1e293b; box-shadow: none; }
+        p { color: #94a3b8; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>服务暂时维护中</h1>
+      <p>应用服务正在重启或短暂不可用，请稍后刷新页面。</p>
+      <p>你的学习数据保存在服务器上，不会因为本次维护丢失。</p>
+    </main>
+  </body>
+</html>
