@@ -27,8 +27,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          # 应用要求 >=22.13；测试使用 module.registerHooks，需要 22.15+。
-          node-version: '22.x'
+          # 应用运行要求 >=22.13；测试在 Node 24 上验证（Node 22 的 undici 定时器行为导致部分 web-fetch 测试未决 Promise）。
+          node-version: '24.x'
           cache: npm
 
       - name: Install dependencies

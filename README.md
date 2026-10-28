@@ -20,11 +20,11 @@ npm run dev
 
 打开 **http://127.0.0.1:5173**。开发命令同时启动 Vite 前端和 `127.0.0.1:3001` 的 API 服务。
 
-`npm run check` 执行 TypeScript 检查，`npm test` 运行 50 个测试文件（教学状态、账户隔离、工作区同步、诊断、复习、迁移、备份、服务端个人凭据、云端书架与同步、前端懒加载、部署静态配置等），`npm run build` 执行 TypeScript 项目构建与 Vite 生产构建。**运行测试需要 Node.js 22.15+**（`tests/markdown.test.ts` 使用 `module.registerHooks`）；应用本身在 22.13+ 可运行。
+`npm run check` 执行 TypeScript 检查，`npm test` 运行 50 个测试文件（教学状态、账户隔离、工作区同步、诊断、复习、迁移、备份、服务端个人凭据、云端书架与同步、前端懒加载、部署静态配置等），`npm run build` 执行 TypeScript 项目构建与 Vite 生产构建。**CI 与测试在 Node.js 24 验证**（Node 22 的 undici 定时器行为导致部分 web-fetch 测试未决 Promise）；应用本身在 22.13+ 可运行。
 
 `npm start` 是**公网生产入口**，会强制要求 HTTPS 公网来源和 Secure Cookie；反向代理信任配置（`ZHIXU_TRUST_PROXY=true`）由 `npm run check:production` 预检脚本强制检查，缺失时退出码为 1。本地个人使用请用 `npm run dev`。正式部署请按「公网部署（单节点正式版）」和 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 配置 `.env`、Docker 与 nginx；未配置 `ZHIXU_PUBLIC_ORIGIN` 等必需生产变量时 `npm start` 会明确失败，而不是降级成无鉴权服务。开发与生产服务都使用 API 端口 3001，不要同时启动两份。
 
-CI：`.github/workflows/ci.yml` 在 push 到 `main`/`master`、pull request 与手动触发时用 Node.js 22 运行 `npm ci`、`npm run check`、`npm test` 与 `npm run build`，不配置任何真实模型/搜索密钥，也不构建或启动 Docker。**本仓库开发机与 CI 都未实际执行 `docker compose build/up`、certbot 或 nginx**；`Dockerfile`、`docker-compose.yml`、`deploy/nginx.conf` 只有静态一致性测试，首次上线必须在目标主机按 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 第 13 节逐项验证。
+CI：`.github/workflows/ci.yml` 在 push 到 `main`/`master`、pull request 与手动触发时用 Node.js 24 运行 `npm ci`、`npm run check`、`npm test` 与 `npm run build`，不配置任何真实模型/搜索密钥，也不构建或启动 Docker。**本仓库开发机与 CI 都未实际执行 `docker compose build/up`、certbot 或 nginx**；`Dockerfile`、`docker-compose.yml`、`deploy/nginx.conf` 只有静态一致性测试，首次上线必须在目标主机按 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 第 13 节逐项验证。
 
 ## Docker 镜像与版本
 
