@@ -1,5 +1,6 @@
 import type {
   DiagnosticProfile,
+  KnowledgeGraph,
   Note,
   QuizQuestion,
   Reference,
@@ -13,6 +14,7 @@ import {
   validateDiagnosticProfile,
   validateQuizQuestion,
 } from "./diagnostic";
+import { emptyGraph, mergeGraphs } from "./knowledgeGraph";
 import { parseLearningState, LearningProtocolError } from "./learningState";
 import { isReviewItem } from "./review";
 import { mergeSessions, mergeSessionIds } from "./sessionMerge";
@@ -160,6 +162,51 @@ function validateOptionalUpdatedAt(value: unknown, label: string): void {
   }
 }
 
+const EVIDENCE_KINDS = ["recognition", "reasoning", "transfer"] as const;
+
+function isKnowledgeEvidence(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (!isString(value.quote) || value.quote.trim() === "") return false;
+  if (!isString(value.questionId) || value.questionId.trim() === "") return false;
+  if (value.question !== undefined && !isString(value.question)) return false;
+  if (!EVIDENCE_KINDS.includes(value.kind as (typeof EVIDENCE_KINDS)[number])) return false;
+  return isNumber(value.turn) && Number.isSafeInteger(value.turn) && value.turn >= 1;
+}
+
+function isKnowledgeProposition(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (!isString(value.id) || value.id.trim() === "") return false;
+  if (!isString(value.statement) || value.statement.trim() === "") return false;
+  if (!isString(value.topic)) return false;
+  if (!isString(value.sourceSessionId)) return false;
+  if (!isNumber(value.verifiedAt)) return false;
+  if (value.strength !== "understood" && value.strength !== "applied") return false;
+  const evidence = value.evidence;
+  return Array.isArray(evidence) && evidence.every(isKnowledgeEvidence);
+}
+
+function isKnowledgeDependency(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (!isString(value.fromId) || value.fromId.trim() === "") return false;
+  if (!isString(value.toId) || value.toId.trim() === "") return false;
+  return isNumber(value.createdAt);
+}
+
+/**
+ * 知识图谱结构校验：命题/依赖都必须是数组，元素字段齐全且类型正确。
+ * 本地存储读取与备份导入共用，坏图谱一律不得进入状态或云端。
+ * 旧备份没有该字段时由调用方按空图谱处理（这里只校验出现时的形状）。
+ */
+export function isKnowledgeGraph(value: unknown): value is KnowledgeGraph {
+  if (!isObject(value)) return false;
+  const { propositions, dependencies } = value;
+  if (!Array.isArray(propositions) || !Array.isArray(dependencies)) return false;
+  return (
+    propositions.every(isKnowledgeProposition) &&
+    dependencies.every(isKnowledgeDependency)
+  );
+}
+
 export interface BackupCurrent {
   sessions: StudySession[];
   notes: Note[];
@@ -167,6 +214,8 @@ export interface BackupCurrent {
   diagnostics: DiagnosticProfile[];
   activity?: string[];
   deletedNoteIds?: string[];
+  /** 当前知识图谱；旧状态没有该字段时按空图谱合并。 */
+  knowledgeGraph?: KnowledgeGraph;
   /** 当前设置；提供时按 settingsUpdatedAt 决定是否被备份设置覆盖。 */
   settingsWithoutSecrets?: StudyBackup["settingsWithoutSecrets"];
   settingsUpdatedAt?: number;
@@ -175,6 +224,7 @@ export interface BackupCurrent {
 export interface BackupImportResult extends BackupCurrent {
   activity: string[];
   deletedNoteIds: string[];
+  knowledgeGraph: KnowledgeGraph;
   settingsWithoutSecrets: StudyBackup["settingsWithoutSecrets"];
   settingsUpdatedAt: number;
   imported: { sessions: number; notes: number; reviews: number; diagnostics: number };
@@ -216,6 +266,7 @@ export function createBackup(input: {
   exportedAt?: number;
   deletedNoteIds?: string[];
   settingsUpdatedAt?: number;
+  knowledgeGraph?: KnowledgeGraph;
 }): StudyBackup {
   const deletedNoteIds = normalizeDeletedNoteIds(input.deletedNoteIds);
   const tombstonedNoteIds = new Set(deletedNoteIds);
@@ -230,6 +281,8 @@ export function createBackup(input: {
     diagnostics: input.diagnostics,
     settingsWithoutSecrets: copySettingsWithoutSecrets(input.settingsWithoutSecrets),
     activity: input.activity,
+    // 图谱始终输出（空图谱也明确表达“尚未沉淀”），旧备份缺字段时由解析层兼容。
+    knowledgeGraph: input.knowledgeGraph ?? emptyGraph(),
     // 墓碑始终输出（空数组也明确表达“没有删除”），并在写备份前归一化。
     deletedNoteIds,
     settingsUpdatedAt: resolveSettingsUpdatedAt(input.settingsUpdatedAt),
@@ -460,6 +513,10 @@ export function parseBackup(raw: string): StudyBackup {
   validateSettingsWithoutSecrets(backup.settingsWithoutSecrets);
   if (backup.deletedNoteIds !== undefined) validateDeletedNoteIds(backup.deletedNoteIds);
   validateSettingsUpdatedAt(backup.settingsUpdatedAt);
+  // 旧备份没有图谱字段：保持 undefined，合并时按空图谱处理。
+  if (backup.knowledgeGraph !== undefined && !isKnowledgeGraph(backup.knowledgeGraph)) {
+    fail("备份的知识图谱无效");
+  }
 
   const sessionIds = new Set<string>();
   for (const session of backup.sessions) {
@@ -503,6 +560,8 @@ export function parseBackup(raw: string): StudyBackup {
  * - 复习项：显式 updatedAt > attempts > dueAt > 是否已评分（兼容旧数据）。
  * - 诊断：submitted 优于未提交；双方已提交时只认严格更大的 evaluatedAt。
  * - 会话沿用跨标签页合并约定：同一会话双向保留消息等增量。
+ * - 知识图谱用 mergeGraphs：命题按 verifiedAt LWW、证据取并集，依赖取并集去重；
+ *   旧备份没有 knowledgeGraph 字段时按空图谱处理，不会清空本机图谱。
  * 笔记额外受墓碑约束：双方 deletedNoteIds 取并集，先过滤当前笔记，再拒绝备份里
  * 任何已墓碑化的 ID，保证旧云端/旧设备中的已删笔记不会复活。
  * 设置按 settingsUpdatedAt 取较新者（缺失按 0），时间戳取双方较大值。
@@ -575,6 +634,13 @@ export function mergeBackup(current: BackupCurrent, backup: StudyBackup): Backup
   }
   const diagnostics = [...diagnosticsById.values()];
 
+  // 图谱复用纯函数合并：命题按 verifiedAt LWW、证据取并集，依赖取并集去重。
+  // 任一端缺字段（旧备份/旧本地状态）都按空图谱处理，不影响另一端的沉淀。
+  const knowledgeGraph = mergeGraphs(
+    current.knowledgeGraph ?? emptyGraph(),
+    backup.knowledgeGraph ?? emptyGraph(),
+  );
+
   const currentSettingsAt = resolveSettingsUpdatedAt(current.settingsUpdatedAt);
   const backupSettingsAt = resolveSettingsUpdatedAt(backup.settingsUpdatedAt);
   const settingsUpdatedAt = Math.max(currentSettingsAt, backupSettingsAt);
@@ -590,6 +656,7 @@ export function mergeBackup(current: BackupCurrent, backup: StudyBackup): Backup
     notes,
     reviews,
     diagnostics,
+    knowledgeGraph,
     activity: mergeSessionIds(current.activity ?? [], backup.activity),
     deletedNoteIds,
     settingsWithoutSecrets,

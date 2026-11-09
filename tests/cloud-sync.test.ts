@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DiagnosticProfile, Note, ReviewItem, StudyBackup, StudySession } from "../src/types";
+import type {
+  DiagnosticProfile,
+  KnowledgeGraph,
+  Note,
+  ReviewItem,
+  StudyBackup,
+  StudySession,
+} from "../src/types";
 import {
   calibratedNow,
   calibrateClock,
@@ -14,6 +21,7 @@ import {
   mergeLocalWithCloud,
   register,
   resetClockCalibration,
+  shiftLocalWorkspaceClock,
   syncWorkspace,
   type Fetcher,
 } from "../src/lib/cloudSync";
@@ -135,6 +143,7 @@ interface LocalData {
   activity: string[];
   deletedNoteIds?: string[];
   settingsUpdatedAt?: number;
+  knowledgeGraph?: KnowledgeGraph;
 }
 
 /** 备份要求诊断记录挂在所属会话上。 */
@@ -189,6 +198,149 @@ test("合并：本地与云端双方独有的会话和笔记都保留", () => {
   assert.ok(outcome.toCloud.sessions >= 1);
   // 合并结果必须仍能通过完整备份校验（会被原样上传）。
   assert.deepEqual(parseBackup(JSON.stringify(outcome.backup)), outcome.backup);
+});
+
+test("跨设备合并知识图谱：双方命题/依赖都保留，同命题 LWW 且证据并集", () => {
+  const localGraph: KnowledgeGraph = {
+    propositions: [
+      {
+        id: "kp_limit",
+        statement: "极限是本机的新表述",
+        topic: "数学分析",
+        sourceSessionId: "s-local",
+        verifiedAt: 300,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "本机核验证据",
+            questionId: "s-local-q1",
+            kind: "reasoning",
+            turn: 1,
+          },
+        ],
+      },
+      {
+        id: "kp_local",
+        statement: "局部可导",
+        topic: "微积分",
+        sourceSessionId: "s-local",
+        verifiedAt: 250,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "本机独有证据",
+            questionId: "s-local-q2",
+            kind: "reasoning",
+            turn: 2,
+          },
+        ],
+      },
+    ],
+    dependencies: [{ fromId: "kp_function", toId: "kp_limit", createdAt: 240 }],
+  };
+  const cloudGraph: KnowledgeGraph = {
+    propositions: [
+      {
+        id: "kp_limit",
+        statement: "极限是云端旧表述",
+        topic: "旧主题",
+        sourceSessionId: "s-cloud",
+        verifiedAt: 100,
+        strength: "applied",
+        evidence: [
+          {
+            quote: "云端核验证据",
+            questionId: "s-cloud-q1",
+            kind: "transfer",
+            turn: 3,
+          },
+        ],
+      },
+      {
+        id: "kp_cloud",
+        statement: "连续不一定可导",
+        topic: "微积分",
+        sourceSessionId: "s-cloud",
+        verifiedAt: 200,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "云端独有证据",
+            questionId: "s-cloud-q2",
+            kind: "reasoning",
+            turn: 4,
+          },
+        ],
+      },
+    ],
+    dependencies: [
+      { fromId: "kp_function", toId: "kp_limit", createdAt: 240 },
+      { fromId: "kp_limit", toId: "kp_derivative", createdAt: 260 },
+    ],
+  };
+
+  const outcome = mergeLocalWithCloud(
+    localData({ knowledgeGraph: localGraph }),
+    SETTINGS,
+    cloudBackup({ knowledgeGraph: cloudGraph }),
+  );
+  const graph = outcome.backup.knowledgeGraph;
+  assert.ok(graph);
+  assert.deepEqual(
+    new Set(graph.propositions.map((proposition) => proposition.id)),
+    new Set(["kp_limit", "kp_local", "kp_cloud"]),
+    "双方独有命题都保留",
+  );
+  const shared = graph.propositions.find((proposition) => proposition.id === "kp_limit");
+  assert.ok(shared);
+  assert.equal(shared.verifiedAt, 300, "较新的核验时间获胜");
+  assert.equal(shared.statement, "极限是本机的新表述");
+  assert.equal(shared.topic, "数学分析");
+  assert.equal(shared.strength, "applied", "任一端达到 applied 即保留最强掌握");
+  assert.equal(shared.evidence.length, 2, "双方证据取并集");
+  assert.deepEqual(
+    new Set(graph.dependencies.map((dependency) => `${dependency.fromId}->${dependency.toId}`)),
+    new Set(["kp_function->kp_limit", "kp_limit->kp_derivative"]),
+    "依赖取并集并去重",
+  );
+  // 上传给云端的备份必须保留图谱且仍能通过完整校验。
+  assert.deepEqual(
+    parseBackup(JSON.stringify(outcome.backup)).knowledgeGraph,
+    graph,
+  );
+});
+
+test("时钟校准同时换算图谱核验时间与依赖时间", () => {
+  const graph: KnowledgeGraph = {
+    propositions: [
+      {
+        id: "kp_limit",
+        statement: "极限",
+        topic: "微积分",
+        sourceSessionId: "s-local",
+        verifiedAt: 5_000,
+        strength: "understood",
+        evidence: [
+          { quote: "证据", questionId: "q1", kind: "reasoning", turn: 1 },
+        ],
+      },
+    ],
+    dependencies: [{ fromId: "kp_function", toId: "kp_limit", createdAt: 4_000 }],
+  };
+  const shifted = shiftLocalWorkspaceClock(
+    localData({
+      sessions: [sessionFixture("s-local", 10_000)],
+      knowledgeGraph: graph,
+    }),
+    -1_000,
+  );
+  assert.equal(shifted.knowledgeGraph?.propositions[0].verifiedAt, 4_000);
+  assert.equal(shifted.knowledgeGraph?.dependencies[0].createdAt, 3_000);
+  assert.equal(
+    graph.propositions[0].verifiedAt,
+    5_000,
+    "换算不得改动输入快照",
+  );
 });
 
 test("合并：同一会话双方消息增量双向保留", () => {

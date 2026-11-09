@@ -1,0 +1,566 @@
+/* ── 知识图谱（KnowledgeGraphView）────────────────────────────────
+   纸感松绿、低饱和边框，与 LearningWorkspace 家族一致；图谱本身用
+   SVG 拓扑分层，窄屏横向滚动而不是压缩节点。 */
+
+.kg-page {
+  max-width: 1240px;
+}
+.kg-heading {
+  align-items: flex-end;
+}
+.kg-heading h1 {
+  margin-top: 12px;
+}
+.kg-heading .eyebrow svg {
+  color: #7d9670;
+}
+.kg-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.kg-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  border: 1px solid #e0e6d6;
+  border-radius: 8px;
+  background: #fbfcf8;
+  padding: 7px 11px;
+  font-size: 11px;
+  color: #727b6c;
+  white-space: nowrap;
+}
+.kg-stat strong {
+  font-size: 15px;
+  font-weight: 600;
+  color: #4c6540;
+}
+.kg-stat.applied {
+  border-color: #cdd9bc;
+  background: #f3f6ed;
+}
+.kg-stat.applied strong {
+  color: #4d6a40;
+}
+
+/* 布局：左侧图谱/主题，右侧粘性详情。 */
+.kg-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 318px;
+  align-items: start;
+  gap: 22px;
+  margin-top: 28px;
+}
+.kg-main {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
+}
+.kg-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  padding: 18px 19px;
+  min-width: 0;
+}
+.kg-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+}
+.kg-card-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.kg-card-head h2 svg {
+  color: #587346;
+}
+.kg-card-head p {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.kg-card-head > span {
+  font-size: 11px;
+  color: #727b6c;
+  white-space: nowrap;
+}
+.kg-map-legend {
+  border: 1px dashed #d5dfca;
+  border-radius: 6px;
+  background: #fbfcf8;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  color: #66745f;
+}
+
+/* SVG 依赖地图 */
+.kg-graph-scroll {
+  overflow-x: auto;
+  border: 1px solid #eef1e9;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 1px 1px, #e8ecdf 1px, transparent 0) 0 0 / 18px 18px,
+    #fbfcf8;
+  padding: 4px 2px 8px;
+}
+.kg-graph-svg {
+  display: block;
+  max-width: none;
+  font-family: inherit;
+}
+.kg-edge {
+  fill: none;
+  stroke: #c4d0b8;
+  stroke-width: 1.5;
+  transition: stroke 160ms ease;
+}
+.kg-edge.is-related {
+  stroke: #7d9670;
+  stroke-width: 2;
+}
+.kg-node {
+  cursor: pointer;
+  outline: none;
+}
+.kg-node-box {
+  fill: #fff;
+  stroke: #dfe5d6;
+  stroke-width: 1;
+  transition:
+    fill 160ms ease,
+    stroke 160ms ease;
+}
+.kg-node:hover .kg-node-box {
+  fill: #fbfcf8;
+  stroke: #b7c8a9;
+}
+.kg-node:focus-visible .kg-node-box {
+  stroke: #849e6c;
+  stroke-width: 2.5;
+}
+.kg-node.is-selected .kg-node-box {
+  fill: #f5f8ef;
+  stroke: #6f8b5f;
+  stroke-width: 2;
+}
+.kg-node-accent.applied {
+  fill: #6f8b5f;
+}
+.kg-node-accent.understood {
+  fill: #c8a65c;
+}
+.kg-node-line {
+  fill: #3f4b3a;
+  font-size: 11px;
+  font-weight: 500;
+  pointer-events: none;
+}
+.kg-node-strength {
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  pointer-events: none;
+}
+.kg-node-strength.applied {
+  fill: #4d6a40;
+}
+.kg-node-strength.understood {
+  fill: #8a6a34;
+}
+.kg-map-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px dashed #dbe3d1;
+  border-radius: 10px;
+  background: #fbfcf8;
+  padding: 14px;
+  color: #727b6c;
+}
+.kg-map-empty svg {
+  flex: none;
+  margin-top: 1px;
+  color: #8ba077;
+}
+.kg-map-empty p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.8;
+}
+
+/* 主题分组与命题卡片 */
+.kg-topics {
+  display: grid;
+  gap: 20px;
+}
+.kg-topic-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.kg-topic-head h3 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #4c6540;
+}
+.kg-topic-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9aae87;
+}
+.kg-topic-head > span:last-child {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #727b6c;
+}
+.kg-prop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+.kg-prop {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e5e8df;
+  border-radius: 10px;
+  background: #fbfcf8;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+.kg-prop:hover {
+  border-color: #c5d2b9;
+}
+.kg-prop.is-selected {
+  border-color: #9db28d;
+  background: #f6f9f1;
+  box-shadow: 0 0 0 1px #c9d7bd inset;
+}
+.kg-prop-main {
+  display: block;
+  flex: 1;
+  width: 100%;
+  padding: 12px 13px 8px;
+  text-align: left;
+}
+.kg-prop-statement {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.65;
+  color: #354232;
+  overflow-wrap: anywhere;
+}
+.kg-prop-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+.kg-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.kg-badge.applied {
+  background: #e8efe1;
+  color: #4d6a40;
+}
+.kg-badge.understood {
+  background: #f6efdf;
+  color: #8a6a34;
+}
+.kg-date {
+  font-size: 10px;
+  color: #7c8575;
+}
+.kg-prop-foot {
+  border-top: 1px dashed #e2e7dc;
+  padding: 4px 8px;
+}
+.kg-session-link,
+.kg-session-name,
+.kg-session-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 30px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: #5f7653;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.kg-session-link {
+  border-radius: 6px;
+  padding: 1px 5px;
+}
+.kg-session-link:hover {
+  background: #eef3e8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.kg-session-link svg {
+  flex: none;
+}
+.kg-session-link > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kg-session-missing {
+  color: #8a9484;
+}
+
+/* 详情面板 */
+.kg-detail {
+  position: sticky;
+  top: 20px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  border: 1px solid #dfe5d6;
+  border-radius: 14px;
+  background: #fff;
+  padding: 20px;
+}
+.kg-detail-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kg-detail-topic {
+  max-width: 60%;
+  overflow: hidden;
+  border: 1px solid #e5e8df;
+  border-radius: 6px;
+  background: #fbfcf8;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: #727b6c;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kg-detail h2 {
+  margin: 12px 0 0;
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.7;
+  color: #36452f;
+  overflow-wrap: anywhere;
+}
+.kg-detail-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #727b6c;
+}
+.kg-detail-time svg {
+  flex: none;
+  color: #8ba077;
+}
+.kg-detail-source {
+  margin-top: 14px;
+  border: 1px solid #e7ecdf;
+  border-radius: 9px;
+  background: #f7f9f3;
+  padding: 9px 11px;
+}
+.kg-meta-label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 9.5px;
+  letter-spacing: 0.8px;
+  color: #8a9484;
+}
+.kg-detail-section {
+  margin-top: 18px;
+  border-top: 1px solid #edf0e9;
+  padding-top: 16px;
+}
+.kg-detail-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #3f4b3a;
+}
+.kg-detail-section h3 svg {
+  flex: none;
+  color: #7d9670;
+}
+.kg-detail-count {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: #8a9484;
+}
+.kg-detail-empty {
+  margin: 9px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #7c8575;
+}
+.kg-evidence {
+  display: grid;
+  gap: 12px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.kg-evidence blockquote {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  border-left: 2px solid #cdd9bc;
+  padding: 2px 0 2px 9px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #46523f;
+  overflow-wrap: anywhere;
+}
+.kg-evidence blockquote svg {
+  flex: none;
+  margin-top: 4px;
+  color: #8ba077;
+}
+.kg-evidence small {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #8a9484;
+  overflow-wrap: anywhere;
+}
+.kg-related-list {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.kg-related {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #e5e8df;
+  border-radius: 8px;
+  background: #fbfcf8;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #4c5a47;
+  text-align: left;
+}
+.kg-related:hover {
+  border-color: #b9caa9;
+  background: #f5f8ef;
+}
+.kg-related > span:first-child {
+  flex: none;
+  color: #8ba077;
+}
+
+/* 空态 */
+.kg-page .kg-empty {
+  margin-top: 36px;
+  border: 1px solid #e5e8df;
+  border-radius: 16px;
+  background: #fbfcf8;
+  padding: 44px 24px 40px;
+}
+.kg-page .kg-empty p {
+  max-width: 520px;
+  margin: 8px auto 0;
+  font-size: 12px;
+  line-height: 1.9;
+  color: #727b6c;
+}
+.kg-page .kg-empty .button {
+  margin-top: 22px;
+  font-size: 12px;
+}
+
+@media (max-width: 1120px) {
+  .kg-layout {
+    grid-template-columns: 1fr;
+  }
+  .kg-detail {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .kg-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .kg-stats {
+    justify-content: flex-start;
+  }
+  .kg-layout {
+    margin-top: 22px;
+  }
+  .kg-card {
+    padding: 15px 14px;
+  }
+  .kg-prop-grid {
+    grid-template-columns: 1fr;
+  }
+  .kg-session-link,
+  .kg-session-name,
+  .kg-session-missing {
+    min-height: 42px;
+  }
+  .kg-related {
+    min-height: 44px;
+    padding: 10px 11px;
+  }
+  .kg-detail {
+    padding: 17px 15px;
+  }
+  .kg-page .kg-empty {
+    padding: 34px 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kg-edge,
+  .kg-node-box,
+  .kg-prop {
+    transition: none;
+  }
+}

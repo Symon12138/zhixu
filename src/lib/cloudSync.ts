@@ -1,4 +1,4 @@
-import type { AuthResult, AuthUser, CloudWorkspace, StudyBackup } from "../types";
+import type { AuthResult, AuthUser, CloudWorkspace, KnowledgeGraph, StudyBackup } from "../types";
 import { createBackup, mergeBackup, parseBackup, resolveSettingsUpdatedAt } from "./backup";
 
 /**
@@ -593,6 +593,8 @@ export interface LocalWorkspaceData {
   activity: string[];
   deletedNoteIds?: string[];
   settingsUpdatedAt?: number;
+  /** 本机知识图谱；旧快照没有该字段时按空图谱参与合并。 */
+  knowledgeGraph?: KnowledgeGraph;
 }
 
 export interface MergeClockOptions {
@@ -611,8 +613,9 @@ export interface MergeClockOptions {
 
 /**
  * 把本地学习数据的时间戳从设备时钟换算到服务端基准：只调整参与 LWW
- * 判断的 updatedAt / evaluatedAt / settingsUpdatedAt，不改动消息时间、
- * dueAt 等业务时间。本地时钟偏快 1 小时时，offset 为 -1 小时，
+ * 判断的 updatedAt / evaluatedAt / settingsUpdatedAt 与知识图谱的
+ * verifiedAt/依赖 createdAt，不改动消息时间、dueAt 等业务时间。
+ * 本地时钟偏快 1 小时时，offset 为 -1 小时，
  * 旧快照不会伪装成未来更新。
  *
  * App 合并云端数据前也复用它来迁移旧版本按设备时钟写入的本地状态。
@@ -662,6 +665,20 @@ export function shiftLocalWorkspaceClock(
         ? {}
         : { evaluatedAt: profile.evaluatedAt + offset }),
     })),
+    ...(local.knowledgeGraph === undefined
+      ? {}
+      : {
+          knowledgeGraph: {
+            propositions: local.knowledgeGraph.propositions.map((proposition) => ({
+              ...proposition,
+              verifiedAt: proposition.verifiedAt + offset,
+            })),
+            dependencies: local.knowledgeGraph.dependencies.map((dependency) => ({
+              ...dependency,
+              createdAt: dependency.createdAt + offset,
+            })),
+          },
+        }),
     ...(local.settingsUpdatedAt === undefined
       ? {}
       : {
@@ -677,6 +694,7 @@ export function shiftLocalWorkspaceClock(
  * 把本地学习数据与云端备份合并：复用 mergeBackup 的方向性合并——
  * 会话按 ID+时间戳双向保留消息增量；笔记按 updatedAt、复习按
  * updatedAt/attempts/dueAt、诊断按 submitted/evaluatedAt 选择较新版本；
+ * 知识图谱用 mergeGraphs 合并（命题 LWW + 证据并集，依赖并集去重）；
  * 双方独有条目都保留，旧副本不得覆盖新进度。
  * 本地先生成备份再合并，保证本地与云端双方数据都不丢。
  * 笔记墓碑取双方并集并过滤笔记；设置按 settingsUpdatedAt 取较新者
@@ -703,6 +721,7 @@ export function mergeLocalWithCloud(
     activity: adjustedLocal.activity,
     deletedNoteIds: adjustedLocal.deletedNoteIds,
     settingsUpdatedAt: adjustedLocal.settingsUpdatedAt,
+    knowledgeGraph: adjustedLocal.knowledgeGraph,
   });
   if (!cloud) {
     const tombstoned = new Set(localBackup.deletedNoteIds ?? []);
@@ -727,6 +746,7 @@ export function mergeLocalWithCloud(
       diagnostics: adjustedLocal.diagnostics,
       activity: adjustedLocal.activity,
       deletedNoteIds: adjustedLocal.deletedNoteIds,
+      knowledgeGraph: adjustedLocal.knowledgeGraph,
       // 未带版本的本地设置只代表旧数据，不参与“较新者”比较；
       // 让 mergeBackup 采用云端设置，保持老账号首次登录的设置迁移行为。
       ...(localSettingsAt > 0
@@ -747,6 +767,7 @@ export function mergeLocalWithCloud(
       notes: cloudMerged.notes,
       reviews: cloudMerged.reviews,
       diagnostics: cloudMerged.diagnostics,
+      knowledgeGraph: cloudMerged.knowledgeGraph,
       activity: cloudMerged.activity,
       deletedNoteIds: cloudMerged.deletedNoteIds,
       // 云端设置版本更新时采用云端设置；本地更新时保留本地设置与时间戳。
@@ -796,10 +817,64 @@ export interface SyncWorkspaceResult {
 }
 
 /**
+ * 图谱内容比较用的规范形：命题/依赖/证据按稳定键排序，缺失图谱与空图谱等价。
+ * 语义相同的图谱不能因为数组顺序不同被误判为“云端有新内容”而反复上传。
+ */
+function snapshotGraph(graph: KnowledgeGraph | undefined): unknown {
+  const propositions = [...(graph?.propositions ?? [])]
+    .map((proposition) => ({
+      id: proposition.id,
+      statement: proposition.statement,
+      topic: proposition.topic,
+      sourceSessionId: proposition.sourceSessionId,
+      verifiedAt: proposition.verifiedAt,
+      strength: proposition.strength,
+      evidence: proposition.evidence
+        .map((item) => ({
+          quote: item.quote,
+          questionId: item.questionId,
+          ...(item.question === undefined ? {} : { question: item.question }),
+          kind: item.kind,
+          turn: item.turn,
+        }))
+        .sort((a, b) =>
+          compareText(
+            `${a.questionId}::${a.turn}::${a.quote}::${a.question ?? ""}`,
+            `${b.questionId}::${b.turn}::${b.quote}::${b.question ?? ""}`,
+          ),
+        ),
+    }))
+    .sort((a, b) =>
+      compareText(
+        `${a.id}\n${a.statement}\n${a.topic}\n${a.verifiedAt}\n${a.strength}`,
+        `${b.id}\n${b.statement}\n${b.topic}\n${b.verifiedAt}\n${b.strength}`,
+      ),
+    );
+  const dependencies = [...(graph?.dependencies ?? [])]
+    .map((dependency) => ({
+      fromId: dependency.fromId,
+      toId: dependency.toId,
+      createdAt: dependency.createdAt,
+    }))
+    .sort((a, b) =>
+      compareText(
+        `${a.fromId}::${a.toId}::${a.createdAt}`,
+        `${b.fromId}::${b.toId}::${b.createdAt}`,
+      ),
+    );
+  return { propositions, dependencies };
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * 内容等价比较：
  * - 忽略只表示上传时间的 exportedAt；
  * - 缺失的墓碑列表与空列表语义相同，并用排序后的集合比较；
  * - 缺失的 settingsUpdatedAt 与 0 语义相同（旧备份没有版本）；
+ * - 缺失的知识图谱与空图谱语义相同，内部数组/证据按稳定键排序后比较；
  * - 会话合并会把缺失的可选 reviews 规范成空数组，这两者语义相同；
  * - 任何非空复习变化仍会出现在比较结果中。
  */
@@ -817,6 +892,7 @@ function snapshotContent(backup: StudyBackup): string {
     notes: backup.notes,
     reviews: backup.reviews,
     diagnostics: backup.diagnostics,
+    knowledgeGraph: snapshotGraph(backup.knowledgeGraph),
     settingsWithoutSecrets: {
       provider: settings.provider,
       model: settings.model,

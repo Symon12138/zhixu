@@ -4,6 +4,7 @@ import type {
   ChatResponse,
   EvidenceKind,
   Flashcard,
+  KnowledgeGraph,
   LearnerIntent,
   LearningAssessment,
   LearningDetour,
@@ -20,6 +21,7 @@ import type {
   TeachingReceipt,
   TeachingSource,
 } from "../src/types";
+import { addDependency, emptyGraph, propositionId } from "../src/lib/knowledgeGraph";
 import { exposesProtectedAnswer, explicitlyRequestsSolution, matchesProtectedNumbers } from "./answers";
 import { bindBookSources } from "./books";
 
@@ -66,10 +68,21 @@ export interface TutorDraft {
   message: string;
   title?: string;
   plan?: string[];
+  /** 路线规划时模型标注的步骤间前提关系（精确步骤标题）。 */
+  dependencies?: PlanDependency[];
   quiz?: QuizQuestion[];
   flashcards?: Flashcard[];
   sources: TeachingSource[];
   teaching?: TeachingDirective;
+}
+
+/**
+ * 模型输出的步骤依赖声明：from 是理解 to 的前提。
+ * 只认 plan 中的精确标题，服务端再转成稳定的命题 id，避免模型编造 id。
+ */
+export interface PlanDependency {
+  from: string;
+  to: string;
 }
 
 const intents: LearnerIntent[] = [
@@ -189,6 +202,42 @@ function parseCards(value: unknown): Flashcard[] {
   });
 }
 
+/** 解析模型给出的步骤依赖声明；结构非法时抛协议错误由修复轮重写。 */
+export function parsePlanDependencies(
+  value: unknown,
+): PlanDependency[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const items = list(value, "dependencies", 24);
+  return items.map((item, index) => {
+    const data = object(item, `dependencies[${index}]`);
+    return {
+      from: text(data.from, `dependencies[${index}].from`, 300),
+      to: text(data.to, `dependencies[${index}].to`, 300),
+    };
+  });
+}
+
+/** 依赖只能引用路线中的精确步骤标题，且步骤不能依赖自身。 */
+export function planDependencyIssues(
+  plan: string[],
+  dependencies: PlanDependency[],
+): TeachingIssue[] {
+  const titles = new Set(plan);
+  const issues: TeachingIssue[] = [];
+  for (const dependency of dependencies) {
+    // 自环/成环由 addDependency 静默拒绝（图结构噪声，容错）。
+    if (dependency.from === dependency.to) continue;
+    // 未知标题是协议违约：模型编造了 plan 里不存在的概念节点，必须拒绝。
+    if (!titles.has(dependency.from) || !titles.has(dependency.to)) {
+      issues.push({
+        code: "unknown_dependency",
+        detail: `依赖 ${dependency.from} → ${dependency.to} 必须使用 plan 中步骤的精确标题`,
+      });
+    }
+  }
+  return issues;
+}
+
 export function parseTutorDraft(
   value: unknown,
   action: ChatRequest["action"],
@@ -220,6 +269,8 @@ export function parseTutorDraft(
   if (data.title !== undefined) draft.title = text(data.title, "title", 200);
   if (data.plan !== undefined)
     draft.plan = strings(data.plan, "plan", 6, 3, 300);
+  if (data.dependencies !== undefined)
+    draft.dependencies = parsePlanDependencies(data.dependencies);
   if (action === "quiz") draft.quiz = parseQuiz(data.quiz);
   if (action === "flashcards") draft.flashcards = parseCards(data.flashcards);
   if (data.teaching !== undefined) {
@@ -384,6 +435,14 @@ export function checkTutorDraft(
         "fabricated_source",
         "引文必须逐字来自本次提供的同名材料，不能伪造来源或把材料当成已核验法规",
       );
+  }
+  if (draft.dependencies?.length) {
+    if (!draft.plan)
+      issue(
+        "dependencies_without_roadmap",
+        "依赖标注只能随新学习路线一起给出；没有 plan 时不能凭空声明步骤前提",
+      );
+    else issues.push(...planDependencyIssues(draft.plan, draft.dependencies));
   }
   if (!coreActions.includes(request.action)) {
     if (
@@ -936,6 +995,30 @@ function recordAnswer(
   }
 }
 
+/**
+ * 把模型标注的步骤依赖转成稳定命题 id 的依赖边。
+ * checkTutorDraft 已校验 from/to 都是 plan 中的精确标题；
+ * addDependency 再去重并拒绝自环/成环，模型不能靠依赖声明制造死循环。
+ */
+function applyPlanDependencies(
+  graph: KnowledgeGraph | undefined,
+  draft: TutorDraft,
+): KnowledgeGraph | undefined {
+  if (!draft.plan || !draft.dependencies?.length) return undefined;
+  let next = graph ?? emptyGraph();
+  const previousCount = next.dependencies.length;
+  const createdAt = Date.now();
+  for (const dependency of draft.dependencies) {
+    next = addDependency(
+      next,
+      propositionId(dependency.from),
+      propositionId(dependency.to),
+      createdAt,
+    );
+  }
+  return next.dependencies.length > previousCount ? next : undefined;
+}
+
 /** Called only after the semantic reviewer passes; progress remains server-computed. */
 export function applyTutorDraft(
   request: ChatRequest,
@@ -965,6 +1048,7 @@ export function applyTutorDraft(
   }
   const issues = checkTutorDraft(request, draft);
   if (issues.length) throw new LearningProtocolError(issues);
+  const annotatedGraph = applyPlanDependencies(request.knowledgeGraph, draft);
   draft = { ...draft, sources: bindBookSources(draft.sources, request.references) };
   let state = existing ? structuredClone(existing) : undefined;
   let receipt: TeachingReceipt | undefined;
@@ -1184,6 +1268,7 @@ export function applyTutorDraft(
     ...(draft.quiz ? { quiz: draft.quiz } : {}),
     ...(draft.flashcards ? { flashcards: draft.flashcards } : {}),
     ...(receipt ? { teaching: receipt } : {}),
+    ...(annotatedGraph ? { knowledgeGraph: annotatedGraph } : {}),
     quality: {
       checked: true,
       repaired: review.repaired,

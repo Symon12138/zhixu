@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   DiagnosticProfile,
+  KnowledgeGraph,
   LearningState,
   Note,
   ReviewItem,
@@ -190,6 +191,31 @@ function currentFixture(): {
   };
 }
 
+function graphFixture(overrides: Partial<KnowledgeGraph> = {}): KnowledgeGraph {
+  return {
+    propositions: [
+      {
+        id: "kp_limit",
+        statement: "极限描述无限逼近的趋势",
+        topic: "微积分",
+        sourceSessionId: "s1",
+        verifiedAt: 100,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "极限是无限逼近但不必到达",
+            questionId: "s1-q1",
+            kind: "reasoning",
+            turn: 1,
+          },
+        ],
+      },
+    ],
+    dependencies: [{ fromId: "kp_function", toId: "kp_limit", createdAt: 50 }],
+    ...overrides,
+  };
+}
+
 test("导出再导入是完整往返：会话、笔记、复习、诊断、活动全部保留", () => {
   const current = currentFixture();
   const backup = createBackup({
@@ -209,6 +235,132 @@ test("导出再导入是完整往返：会话、笔记、复习、诊断、活�
   assert.deepEqual(parsed.activity, ["2026-10-25"]);
   assert.deepEqual(parsed.settingsWithoutSecrets, safeSettingsFixture());
   assert.equal("apiKey" in parsed.settingsWithoutSecrets, false);
+});
+
+test("备份包含知识图谱：导出再导入完整保留命题与依赖", () => {
+  const graph = graphFixture();
+  const backup = createBackup({
+    ...currentFixture(),
+    settingsWithoutSecrets: safeSettingsFixture(),
+    activity: ["2026-10-25"],
+    exportedAt: 1234,
+    knowledgeGraph: graph,
+  });
+  const parsed = parseBackup(JSON.stringify(backup));
+  assert.deepEqual(parsed.knowledgeGraph, graph);
+  assert.deepEqual(backup.knowledgeGraph, graph);
+
+  const empty = createBackup({
+    ...currentFixture(),
+    settingsWithoutSecrets: safeSettingsFixture(),
+    activity: [],
+  });
+  assert.deepEqual(empty.knowledgeGraph, { propositions: [], dependencies: [] });
+});
+
+test("合并知识图谱使用 mergeGraphs：命题 LWW、证据并集、依赖去重", () => {
+  const localGraph = graphFixture();
+  const incomingGraph: KnowledgeGraph = {
+    propositions: [
+      {
+        id: "kp_limit",
+        statement: "极限是导数与积分的基础",
+        topic: "数学分析",
+        sourceSessionId: "s2",
+        verifiedAt: 200,
+        strength: "applied",
+        evidence: [
+          {
+            quote: "先用极限定义导数",
+            questionId: "s2-q2",
+            kind: "transfer",
+            turn: 3,
+          },
+        ],
+      },
+      {
+        id: "kp_derivative",
+        statement: "导数是瞬时变化率",
+        topic: "微积分",
+        sourceSessionId: "s2",
+        verifiedAt: 210,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "导数是函数在某点的瞬时变化率",
+            questionId: "s2-q3",
+            kind: "reasoning",
+            turn: 4,
+          },
+        ],
+      },
+    ],
+    dependencies: [
+      // 与本地重复的边只保留一条。
+      { fromId: "kp_function", toId: "kp_limit", createdAt: 50 },
+      { fromId: "kp_limit", toId: "kp_derivative", createdAt: 200 },
+    ],
+  };
+  const merged = mergeBackup(
+    { ...currentFixture(), knowledgeGraph: localGraph },
+    backupFixture({ knowledgeGraph: incomingGraph }),
+  );
+  assert.equal(merged.knowledgeGraph.propositions.length, 2);
+  const shared = merged.knowledgeGraph.propositions.find(
+    (proposition) => proposition.id === "kp_limit",
+  );
+  assert.ok(shared);
+  assert.equal(shared.verifiedAt, 200);
+  assert.equal(shared.strength, "applied");
+  assert.equal(shared.statement, "极限是导数与积分的基础");
+  assert.equal(shared.topic, "数学分析");
+  assert.equal(shared.sourceSessionId, "s1", "来源会话保留首次沉淀值");
+  assert.equal(shared.evidence.length, 2, "双方证据必须取并集");
+  assert.deepEqual(
+    new Set(
+      merged.knowledgeGraph.dependencies.map(
+        (dependency) => `${dependency.fromId}->${dependency.toId}`,
+      ),
+    ),
+    new Set(["kp_function->kp_limit", "kp_limit->kp_derivative"]),
+  );
+});
+
+test("旧备份没有 knowledgeGraph 字段：解析兼容，合并按空图谱处理", () => {
+  const legacy = backupFixture();
+  assert.equal("knowledgeGraph" in legacy, false);
+  const parsed = parseBackup(JSON.stringify(legacy));
+  assert.equal(parsed.knowledgeGraph, undefined);
+
+  const localGraph = graphFixture();
+  const kept = mergeBackup(
+    { ...currentFixture(), knowledgeGraph: localGraph },
+    parsed,
+  );
+  assert.deepEqual(kept.knowledgeGraph, localGraph, "旧备份不得清空本机图谱");
+
+  const noGraphs = mergeBackup(currentFixture(), parsed);
+  assert.deepEqual(noGraphs.knowledgeGraph, { propositions: [], dependencies: [] });
+});
+
+test("parseBackup 拒绝结构不合法的知识图谱", () => {
+  for (const [label, graph] of [
+    ["命题不是数组", { propositions: "bad", dependencies: [] }],
+    ["依赖不是数组", { propositions: [], dependencies: {} }],
+    ["命题缺少核验时间", { propositions: [{ id: "kp", statement: "x", topic: "t", sourceSessionId: "s", strength: "understood", evidence: [] }], dependencies: [] }],
+    ["依赖缺少目标", { propositions: [], dependencies: [{ fromId: "a", createdAt: 1 }] }],
+  ] as const) {
+    assert.throws(
+      () =>
+        parseBackup(
+          JSON.stringify(
+            backupFixture({ knowledgeGraph: graph as unknown as KnowledgeGraph }),
+          ),
+        ),
+      /知识图谱/,
+      label,
+    );
+  }
 });
 
 test("合并导入：新 ID 全部进入，无冲突时计数为零", () => {

@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { Note, StudySession } from "../src/types";
+import type { KnowledgeGraph, Note, StudySession } from "../src/types";
 import { readStoredValue } from "../src/lib/persistentStorage";
-import { isNote, isSession, mergeNotes, useStudyStorage } from "../src/lib/storage";
+import {
+  isKnowledgeGraph,
+  isNote,
+  isSession,
+  KNOWLEDGE_GRAPH_KEY,
+  mergeNotes,
+  useStudyStorage,
+} from "../src/lib/storage";
 import { withTabRequestLock } from "../src/lib/requestLock";
 
 const sessionsKey = "zhixu.v1.sessions";
@@ -61,16 +68,21 @@ test("多次渲染只读取一次 localStorage", () => {
     let renders = 0;
     function Probe() {
       renders += 1;
-      const { sessions, notes, activity } = useStudyStorage();
+      const { sessions, notes, activity, graph } = useStudyStorage();
       const [pass, setPass] = useState(0);
       if (pass === 0) setPass(1);
-      return createElement("span", null, `${sessions.length}/${notes.length}/${activity.length}`);
+      return createElement(
+        "span",
+        null,
+        `${sessions.length}/${notes.length}/${activity.length}/${graph.propositions.length}`,
+      );
     }
-    assert.equal(renderToStaticMarkup(createElement(Probe)), "<span>0/0/0</span>");
+    assert.equal(renderToStaticMarkup(createElement(Probe)), "<span>0/0/0/0</span>");
     assert.equal(renders, 2, "测试必须触发一次真实的重渲染");
     assert.deepEqual(reads, [
       "zhixu.v1.sessions",
       "zhixu.v1.notes",
+      "zhixu.v1.graph",
       "zhixu.v1.activity",
     ]);
   } finally {
@@ -190,4 +202,97 @@ test("笔记跨标签页按 ID 合并：双方独有记录都保留，同 ID 以
   assert.equal(merged[1].sessionId, "", "独立笔记的空 sessionId 保留");
   assert.equal(merged[2].content, "新增");
   assert.equal(JSON.stringify(local), snapshot, "合并不得改动输入数组");
+});
+
+function graphFixture(): KnowledgeGraph {
+  return {
+    propositions: [
+      {
+        id: "kp_derivative",
+        statement: "导数是瞬时变化率",
+        topic: "微积分",
+        sourceSessionId: "s1",
+        verifiedAt: 100,
+        strength: "understood",
+        evidence: [
+          {
+            quote: "导数是函数在某点的瞬时变化率",
+            questionId: "s1-q1",
+            kind: "reasoning",
+            turn: 2,
+          },
+        ],
+      },
+    ],
+    dependencies: [{ fromId: "kp_limit", toId: "kp_derivative", createdAt: 90 }],
+  };
+}
+
+test("本机知识图谱使用 zhixu.v1.graph，结构不合法时拒绝", () => {
+  assert.equal(KNOWLEDGE_GRAPH_KEY, "zhixu.v1.graph");
+  const graph = graphFixture();
+  assert.equal(isKnowledgeGraph(graph), true);
+  for (const [label, value] of [
+    ["不是对象", []],
+    ["缺少 propositions", { dependencies: [] }],
+    ["缺少 dependencies", { propositions: [] }],
+    ["命题不是对象", { propositions: [null], dependencies: [] }],
+    ["命题缺少 id", { propositions: [{ ...graph.propositions[0], id: "" }], dependencies: [] }],
+    [
+      "命题强度非法",
+      { propositions: [{ ...graph.propositions[0], strength: "mastered" }], dependencies: [] },
+    ],
+    [
+      "证据类型非法",
+      {
+        propositions: [
+          {
+            ...graph.propositions[0],
+            evidence: [{ ...graph.propositions[0].evidence[0], kind: "guess" }],
+          },
+        ],
+        dependencies: [],
+      },
+    ],
+    ["依赖时间非法", { propositions: [], dependencies: [{ ...graph.dependencies[0], createdAt: "90" }] }],
+  ] as const) {
+    assert.equal(isKnowledgeGraph(value), false, label);
+  }
+});
+
+test("useStudyStorage 读取本机知识图谱，坏数据回退空图谱", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const graph = graphFixture();
+  const withGraph = {
+    getItem: (key: string) => (key === KNOWLEDGE_GRAPH_KEY ? JSON.stringify(graph) : null),
+    setItem: () => undefined,
+  };
+  const withBrokenGraph = {
+    getItem: (key: string) =>
+      key === KNOWLEDGE_GRAPH_KEY ? JSON.stringify({ propositions: "bad", dependencies: [] }) : null,
+    setItem: () => undefined,
+  };
+  function Probe() {
+    const { graph: stored } = useStudyStorage();
+    return createElement(
+      "span",
+      null,
+      `${stored.propositions[0]?.statement ?? "empty"}|${stored.dependencies.length}`,
+    );
+  }
+  try {
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: withGraph });
+    assert.equal(
+      renderToStaticMarkup(createElement(Probe)),
+      "<span>导数是瞬时变化率|1</span>",
+    );
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: withBrokenGraph,
+    });
+    assert.equal(renderToStaticMarkup(createElement(Probe)), "<span>empty|0</span>");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
 });

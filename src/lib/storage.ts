@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { Note, StudySession } from "../types";
-import { normalizeDeletedNoteIds, noteUpdatedAt } from "./backup";
+import type { KnowledgeGraph, Note, StudySession } from "../types";
+import { isKnowledgeGraph, normalizeDeletedNoteIds, noteUpdatedAt } from "./backup";
+import { emptyGraph, mergeGraphs } from "./knowledgeGraph";
 import { readStoredValue, STORAGE_PREFIX as prefix } from "./persistentStorage";
 import { mergeSessions, mergeSessionIds } from "./sessionMerge";
+
+export { isKnowledgeGraph };
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -74,6 +77,9 @@ function isNoteList(value: unknown): value is Note[] {
 
 /** 已删除笔记墓碑的持久化键；App 写入同一键，storage 合并时读取以避免复活。 */
 export const DELETED_NOTE_IDS_KEY = `${prefix}deleted-notes`;
+
+/** 本机知识图谱的持久化键 `zhixu.v1.graph`（与 sessions/notes 同级；账户切换时随 zhixu.v1.* 一起归档/清理）。 */
+export const KNOWLEDGE_GRAPH_KEY = `${prefix}graph`;
 
 /** 读取本机墓碑；存储不可用或数据损坏时视为没有墓碑（不阻断正常保存）。 */
 function readStoredDeletedNoteIds(): string[] {
@@ -182,6 +188,61 @@ function useStoredList<T>(
   return [value, setStoredValue, storageError || readWarning] as const;
 }
 
+/**
+ * 本机知识图谱读写：与 sessions/notes 同一套存储语义——
+ * - 读取失败/数据损坏时保留原始内容，等用户确认后再覆盖；
+ * - 写盘与跨标签页事件都先用 mergeGraphs 合并，避免另一标签页刚沉淀的命题被覆盖；
+ * - 图谱是对象而非列表，不能复用 useStoredList。
+ */
+function useStoredGraph(key: string) {
+  const [initial] = useState(() =>
+    readStoredValue(localStorage, key, emptyGraph(), isKnowledgeGraph),
+  );
+  const [value, setValue] = useState<KnowledgeGraph>(initial.value);
+  const preserveRaw = useRef(initial.preserveRaw);
+  const [readWarning, setReadWarning] = useState(initial.preserveRaw);
+  const [storageError, setStorageError] = useState(false);
+  const [canPersist, setCanPersist] = useState(!initial.preserveRaw);
+  const setStoredGraph: Dispatch<SetStateAction<KnowledgeGraph>> = useCallback((next) => {
+    if (preserveRaw.current && typeof window !== "undefined" && !window.confirm("检测到无法读取的本地记录。继续操作将用当前内容替换原始记录。请先导出备份；是否继续？")) return;
+    preserveRaw.current = false;
+    setCanPersist(true);
+    setValue(next);
+  }, []);
+  useEffect(() => {
+    if (!canPersist || preserveRaw.current) return;
+    try {
+      const disk = readStoredValue(localStorage, key, emptyGraph(), isKnowledgeGraph);
+      const next = disk.preserveRaw ? value : mergeGraphs(disk.value, value);
+      localStorage.setItem(prefix + key, JSON.stringify(next));
+      setStorageError(false);
+    } catch {
+      setStorageError(true);
+    }
+  }, [key, value, canPersist]);
+  useEffect(() => {
+    function syncFromOtherTab(event: StorageEvent) {
+      if (event.storageArea !== localStorage || event.key !== prefix + key) return;
+      try {
+        const next: unknown = JSON.parse(event.newValue ?? "null");
+        if (!isKnowledgeGraph(next)) return;
+        preserveRaw.current = false;
+        setCanPersist(true);
+        setReadWarning(false);
+        setValue((previous) => {
+          const merged = mergeGraphs(previous, next);
+          return JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
+        });
+      } catch {
+        /* A malformed external write must not erase the current graph. */
+      }
+    }
+    window.addEventListener("storage", syncFromOtherTab);
+    return () => window.removeEventListener("storage", syncFromOtherTab);
+  }, [key]);
+  return [value, setStoredGraph, storageError || readWarning] as const;
+}
+
 export function useStudyStorage() {
   const [sessions, setSessions, sessionError] = useStoredList(
     "sessions",
@@ -189,6 +250,7 @@ export function useStudyStorage() {
     mergeSessions,
   );
   const [notes, setNotes, noteError] = useStoredList("notes", isNoteList, mergeNotes);
+  const [graph, setGraph, graphError] = useStoredGraph("graph");
   // 初始化时也应用墓碑：如果上次在“写墓碑”和“删笔记”之间崩溃，磁盘里可能残留
   // 已删笔记；仅靠保存时的 merge 会让它在当前标签页继续显示/被写回。
   // 同时监听墓碑键：其他标签页删除笔记后，即使笔记列表事件尚未到达，也立即过滤。
@@ -218,7 +280,7 @@ export function useStudyStorage() {
     isActivityList,
     mergeSessionIds,
   );
-  const storageError = sessionError || noteError || activityError;
+  const storageError = sessionError || noteError || graphError || activityError;
   function recordActivity() {
     const date = new Date();
     const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -231,6 +293,8 @@ export function useStudyStorage() {
     setSessions,
     notes,
     setNotes,
+    graph,
+    setGraph,
     activity,
     setActivity,
     recordActivity,

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import type { ChatRequest, ServerConfig } from "../src/types";
+import { isKnowledgeGraph } from "../src/lib/backup";
 import { ApiError, chatCompletion, resolveEnvStatus, validateModelConfig } from "./ai";
 import { attachUser, registerAuthRoutes, requireAuth } from "./auth";
 import { LearningProtocolError, parseLearningState } from "./learning";
@@ -211,6 +212,19 @@ function validateChatRequest(body: unknown): ChatRequest {
     if (cause instanceof BookContextError) throw new ApiError(400, cause.message);
     throw cause;
   }
+  // 跨会话图谱只作导师背景与依赖合并；限制规模，避免损坏数据或超长提示。
+  let knowledgeGraph: ChatRequest["knowledgeGraph"];
+  if (b.knowledgeGraph !== undefined && b.knowledgeGraph !== null) {
+    const graph = b.knowledgeGraph;
+    if (
+      !isKnowledgeGraph(graph) ||
+      graph.propositions.length > 500 ||
+      graph.dependencies.length > 2000
+    ) {
+      throw new ApiError(400, "附带的知识图谱结构不合法或超出容量上限。");
+    }
+    knowledgeGraph = graph;
+  }
   return {
     settings,
     topic,
@@ -222,6 +236,7 @@ function validateChatRequest(body: unknown): ChatRequest {
     ...(b.webSearch === true ? { webSearch: true } : {}),
     learningState,
     ...(bookContext ? { bookContext } : {}),
+    ...(knowledgeGraph ? { knowledgeGraph } : {}),
   };
 }
 

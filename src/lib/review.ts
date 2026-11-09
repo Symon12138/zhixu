@@ -1,9 +1,12 @@
 import type {
+  KnowledgeGraph,
+  KnowledgeProposition,
   LearningMisconception,
   ReviewItem,
   ReviewRating,
   StudySession,
 } from "../types";
+import { unmetPrerequisites } from "./knowledgeGraph";
 
 /**
  * 复习调度（间隔复习 / 错题本）核心逻辑。
@@ -25,11 +28,22 @@ const REVIEW_KINDS = ["quiz", "misconception", "concept"] as const;
 const REVIEW_SOURCES = ["quiz", "misconception", "concept", "diagnostic"] as const;
 const REVIEW_RATINGS = ["again", "fuzzy", "known"] as const;
 
+/**
+ * 知识图谱命题生成的复习项沿用既有的 concept 来源/类型。
+ * 界面据此标注「来自知识图谱 · 主题」，不引入无法通过备份校验的新来源值。
+ */
+export const KNOWLEDGE_GRAPH_REVIEW_SOURCE = "concept" as const;
+
 export interface ReviewIdOptions {
   /** 注入的当前时间（毫秒时间戳）。 */
   now: number;
   /** 注入的 ID 生成器，保证测试可复现。 */
   newId: () => string;
+}
+
+export interface KnowledgeGraphReviewOptions extends ReviewIdOptions {
+  /** 最多生成的新复习项数量（未核验的前置补练也计入）；缺省不限制。 */
+  limit?: number;
 }
 
 export interface CreateReviewItemInput {
@@ -118,6 +132,19 @@ function assertReviewItem(value: unknown, context: string): ReviewItem {
     throw new Error(`${context} 不是结构完整的复习项`);
   }
   return value;
+}
+
+/**
+ * 是否为知识图谱命题生成的主动回忆练习。
+ * 图谱练习复用 concept 来源（见 KNOWLEDGE_GRAPH_REVIEW_SOURCE），
+ * 界面据此标注「来自知识图谱 · 主题」。
+ */
+export function isKnowledgeGraphReviewItem(item: ReviewItem): boolean {
+  return (
+    isReviewItem(item) &&
+    item.source === KNOWLEDGE_GRAPH_REVIEW_SOURCE &&
+    item.kind === "concept"
+  );
 }
 
 /**
@@ -402,5 +429,254 @@ export function sessionReviewItems(
       ),
     );
   }
+  return items;
+}
+
+function comparePropositions(
+  a: KnowledgeProposition,
+  b: KnowledgeProposition,
+): number {
+  if (a.verifiedAt !== b.verifiedAt) return a.verifiedAt - b.verifiedAt;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function latestEvidenceQuote(proposition: KnowledgeProposition): string | undefined {
+  for (let index = proposition.evidence.length - 1; index >= 0; index -= 1) {
+    const evidence: unknown = proposition.evidence[index];
+    if (
+      isPlainRecord(evidence) &&
+      typeof evidence.quote === "string" &&
+      evidence.quote.trim() !== ""
+    ) {
+      return evidence.quote;
+    }
+  }
+  return undefined;
+}
+
+/** 把一条图谱命题转换为「不看资料、主动复述」的复习项输入。 */
+function knowledgeGraphReviewInput(
+  proposition: KnowledgeProposition,
+  prerequisites: KnowledgeProposition[],
+): CreateReviewItemInput {
+  const prerequisiteText = prerequisites
+    .map((item) => `「${item.statement}」`)
+    .join("、");
+  const prompt = prerequisites.length
+    ? `不看资料，主动复述「${proposition.statement}」，并说明它与前置概念${prerequisiteText}的关系。`
+    : `不看资料，主动复述这个概念：「${proposition.statement}」。`;
+  const correctExplanation = prerequisites.length
+    ? `${proposition.statement}\n\n前置关系：先理解${prerequisiteText}，再理解「${proposition.statement}」。`
+    : proposition.statement;
+  return {
+    sessionId: proposition.sourceSessionId,
+    topic: proposition.topic,
+    questionId: proposition.id,
+    prompt,
+    kind: "concept",
+    reason: "知识图谱中只达到「能辨认」，尚未完成应用核验",
+    hint: prerequisites.length
+      ? `先回想这句话的含义，再说明它为什么依赖前置概念${prerequisiteText}。`
+      : "先合上资料，用一句话说出它的含义，再举一个自己的例子。",
+    learnerQuote: latestEvidenceQuote(proposition),
+    correctExplanation,
+    source: KNOWLEDGE_GRAPH_REVIEW_SOURCE,
+  };
+}
+
+/** 校验知识图谱快照，避免损坏数据在生成复习项时静默跳过。 */
+function assertKnowledgeGraph(
+  value: unknown,
+  context: string,
+): asserts value is KnowledgeGraph {
+  if (!isPlainRecord(value)) {
+    throw new Error(`${context}：知识图谱必须为对象`);
+  }
+  if (!Array.isArray(value.propositions)) {
+    throw new Error(`${context}：知识图谱缺少命题列表`);
+  }
+  if (!Array.isArray(value.dependencies)) {
+    throw new Error(`${context}：知识图谱缺少依赖列表`);
+  }
+  for (const proposition of value.propositions) {
+    if (!isPlainRecord(proposition)) {
+      throw new Error(`${context}：命题必须为对象`);
+    }
+    for (const field of ["id", "statement", "topic", "sourceSessionId"] as const) {
+      const fieldValue = proposition[field];
+      if (typeof fieldValue !== "string" || fieldValue.trim() === "") {
+        throw new Error(`${context}：命题缺少有效 ${field}`);
+      }
+    }
+    if (!isNonNegativeNumber(proposition.verifiedAt)) {
+      throw new Error(`${context}：命题 ${String(proposition.id)} 的 verifiedAt 无效`);
+    }
+    if (
+      proposition.strength !== "understood" &&
+      proposition.strength !== "applied"
+    ) {
+      throw new Error(`${context}：命题 ${String(proposition.id)} 的 strength 无效`);
+    }
+    if (!Array.isArray(proposition.evidence)) {
+      throw new Error(`${context}：命题 ${String(proposition.id)} 缺少证据列表`);
+    }
+  }
+  for (const dependency of value.dependencies) {
+    if (!isPlainRecord(dependency)) {
+      throw new Error(`${context}：依赖必须为对象`);
+    }
+    for (const field of ["fromId", "toId"] as const) {
+      const fieldValue = dependency[field];
+      if (typeof fieldValue !== "string" || fieldValue.trim() === "") {
+        throw new Error(`${context}：依赖缺少有效 ${field}`);
+      }
+    }
+    if (!isNonNegativeNumber(dependency.createdAt)) {
+      throw new Error(
+        `${context}：依赖 ${String(dependency.fromId)}→${String(dependency.toId)} 的 createdAt 无效`,
+      );
+    }
+  }
+}
+
+function trackedPropositionIds(existing: ReviewItem[]): Set<string> {
+  return new Set(
+    existing
+      .filter(
+        (item) => isReviewItem(item) && typeof item.questionId === "string",
+      )
+      .map((item) => item.questionId as string),
+  );
+}
+
+/**
+ * 从知识图谱生成主动回忆练习：只取 strength="understood" 的命题
+ * （能辨认但还没应用），优先安排仍被别人依赖、或自身前置未核验的命题。
+ *
+ * 练习某个命题前会先递归补练其未核验的前置（unmetPrerequisites），
+ * 因此返回顺序满足「先懂前置，再练目标」。已有相同 questionId 的复习项
+ * 不会重复生成；前置已升级为 applied 时视为已满足，不再补练。
+ * 本函数只生成复习项，调用方负责并入会话/工作区并持久化。
+ */
+export function knowledgeGraphReviewItems(
+  graph: KnowledgeGraph,
+  options: KnowledgeGraphReviewOptions,
+  existing: ReviewItem[] = [],
+): ReviewItem[] {
+  const context = "知识图谱复习生成";
+  assertKnowledgeGraph(graph, context);
+  const now = requireNow(options?.now, context);
+  const newId = requireIdFactory(options?.newId, context);
+  if (!Array.isArray(existing)) {
+    throw new Error(`${context}：existing 必须为数组`);
+  }
+  const limit = options?.limit;
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 0)) {
+    throw new Error(`${context}：limit 必须为非负整数`);
+  }
+  if (limit === 0) return [];
+
+  const tracked = trackedPropositionIds(existing);
+  const unmetByTarget = new Map<string, KnowledgeProposition[]>();
+  const blocking = new Set<string>();
+  for (const proposition of graph.propositions) {
+    const prerequisites = unmetPrerequisites(graph, proposition.id);
+    unmetByTarget.set(proposition.id, prerequisites);
+    for (const prerequisite of prerequisites) blocking.add(prerequisite.id);
+  }
+  const priority = (proposition: KnowledgeProposition): number => {
+    if (blocking.has(proposition.id)) return 0;
+    if ((unmetByTarget.get(proposition.id)?.length ?? 0) > 0) return 1;
+    return 2;
+  };
+  const candidates = graph.propositions
+    .filter((proposition) => proposition.strength === "understood")
+    .sort(
+      (a, b) => priority(a) - priority(b) || comparePropositions(a, b),
+    );
+
+  const items: ReviewItem[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  function visit(proposition: KnowledgeProposition): void {
+    if (visited.has(proposition.id) || visiting.has(proposition.id)) return;
+    visiting.add(proposition.id);
+    const prerequisites = (unmetByTarget.get(proposition.id) ?? [])
+      .slice()
+      .sort(comparePropositions);
+    for (const prerequisite of prerequisites) visit(prerequisite);
+    visiting.delete(proposition.id);
+    visited.add(proposition.id);
+    if (proposition.strength !== "understood") return;
+    if (tracked.has(proposition.id)) return;
+    if (limit !== undefined && items.length >= limit) return;
+    items.push(
+      createReviewItem(knowledgeGraphReviewInput(proposition, prerequisites), {
+        now,
+        newId,
+      }),
+    );
+  }
+
+  for (const candidate of candidates) {
+    if (limit !== undefined && items.length >= limit) break;
+    visit(candidate);
+  }
+  return items;
+}
+
+/**
+ * 为指定图谱命题生成练习：未核验的前置递归补练在前，目标命题在后。
+ * 目标已是 applied（已能应用）时无需再练，返回空数组。
+ * 已存在的复习项按 questionId 去重，但不会阻止其缺失的前置补练。
+ */
+export function propositionReviewItems(
+  graph: KnowledgeGraph,
+  propositionId: string,
+  options: ReviewIdOptions,
+  existing: ReviewItem[] = [],
+): ReviewItem[] {
+  const context = "命题练习生成";
+  assertKnowledgeGraph(graph, context);
+  const now = requireNow(options?.now, context);
+  const newId = requireIdFactory(options?.newId, context);
+  if (!Array.isArray(existing)) {
+    throw new Error(`${context}：existing 必须为数组`);
+  }
+  const targetId = requireText(propositionId, "propositionId", context);
+  const target = graph.propositions.find(
+    (proposition) => proposition.id === targetId,
+  );
+  if (!target) {
+    throw new Error(`${context}：知识图谱中不存在命题 ${targetId}`);
+  }
+  if (target.strength !== "understood") return [];
+
+  const tracked = trackedPropositionIds(existing);
+  const items: ReviewItem[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  function visit(proposition: KnowledgeProposition): void {
+    if (visited.has(proposition.id) || visiting.has(proposition.id)) return;
+    visiting.add(proposition.id);
+    const prerequisites = unmetPrerequisites(graph, proposition.id)
+      .slice()
+      .sort(comparePropositions);
+    for (const prerequisite of prerequisites) visit(prerequisite);
+    visiting.delete(proposition.id);
+    visited.add(proposition.id);
+    if (proposition.strength !== "understood") return;
+    if (tracked.has(proposition.id)) return;
+    items.push(
+      createReviewItem(knowledgeGraphReviewInput(proposition, prerequisites), {
+        now,
+        newId,
+      }),
+    );
+  }
+
+  visit(target);
   return items;
 }

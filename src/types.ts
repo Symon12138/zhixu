@@ -130,6 +130,11 @@ export interface ChatRequest {
   webSearch?: boolean;
   learningState?: LearningState;
   bookContext?: BookStudyContext;
+  /**
+   * 当前跨会话知识图谱：已核验命题作为“已掌握背景”注入导师上下文，
+   * 规划新路线时也在其上追加依赖边。旧客户端不传仍合法。
+   */
+  knowledgeGraph?: KnowledgeGraph;
 }
 
 export interface ChatResponse {
@@ -141,6 +146,11 @@ export interface ChatResponse {
   learningState?: LearningState;
   teaching?: TeachingReceipt;
   quality?: TeachingQuality;
+  /**
+   * 本轮路线规划标注出的依赖边（可能包含请求中原有的命题与依赖）。
+   * 客户端只用 mergeGraphs/addDependency 并入本机图谱，不整包覆盖本地已沉淀命题。
+   */
+  knowledgeGraph?: KnowledgeGraph;
 }
 
 export interface ServerConfig {
@@ -312,6 +322,11 @@ export interface StudyBackup {
    * 只有更新的版本才能覆盖另一端的设置，防止旧设备压掉新改动。
    */
   settingsUpdatedAt?: number;
+  /**
+   * 跨会话沉淀的知识图谱（可选，旧备份没有该字段，按空图谱处理）。
+   * 随工作区同步与备份；合并时按 topic/statement LWW、证据取并集。
+   */
+  knowledgeGraph?: KnowledgeGraph;
 }
 
 export type MasteryLevel = "new" | "learning" | "understood" | "applied";
@@ -470,4 +485,44 @@ export interface TeachingQuality {
   formatRepairs?: string[];
   reviewAttempts?: number;
   limitations: string[];
+}
+
+/* ── 知识图谱：跨会话沉淀的命题与依赖 ───────────────────────────── */
+
+/**
+ * 命题节点：一个被核验通过的概念/事实。
+ * 只有在会话中获得真实理解证据（核验通过）后才沉淀，不凭空生成。
+ */
+export interface KnowledgeProposition {
+  /** 稳定 id，由内容规范化生成（同概念跨会话复用同一节点）。 */
+  id: string;
+  /** 命题内容：一句可判定真假的陈述（"导数是函数在某点的瞬时变化率"）。 */
+  statement: string;
+  /** 所属主题/学科领域，用于分组与筛选。 */
+  topic: string;
+  /** 首次沉淀的来源会话 id。 */
+  sourceSessionId: string;
+  /** 最近一次核验时间（LWW 合并依据）。 */
+  verifiedAt: number;
+  /** 核验强度：understood=能复述/辨认，applied=能独立应用/迁移。 */
+  strength: "understood" | "applied";
+  /** 支撑证据（来自会话的真实作答引文，可回溯）。 */
+  evidence: LearningEvidence[];
+}
+
+/**
+ * 依赖边：proposition fromId 是理解 toId 的前提。
+ * 由导师模型在规划路线时标注，表示"先懂 fromId 才能懂 toId"。
+ */
+export interface KnowledgeDependency {
+  fromId: string;
+  toId: string;
+  /** 依赖标注时间。 */
+  createdAt: number;
+}
+
+/** 知识图谱快照：命题 + 依赖，随工作区同步与备份。 */
+export interface KnowledgeGraph {
+  propositions: KnowledgeProposition[];
+  dependencies: KnowledgeDependency[];
 }

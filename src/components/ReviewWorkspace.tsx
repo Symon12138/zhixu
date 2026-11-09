@@ -16,6 +16,7 @@ import type {
   ReviewItem,
   ReviewRating,
 } from "../types";
+import { isKnowledgeGraphReviewItem } from "../lib/review";
 import { RichText } from "./RichText";
 import "./LearningWorkspace.css";
 
@@ -52,6 +53,13 @@ const kindLabels: Record<ReviewItem["kind"], string> = {
   misconception: "误区",
   concept: "概念回想",
 };
+
+/** 图谱命题标注来源与主题；其他复习项沿用原类型标签。 */
+function reviewKindLabel(item: ReviewItem): string {
+  return isKnowledgeGraphReviewItem(item)
+    ? `来自知识图谱 · ${item.topic}`
+    : kindLabels[item.kind] ?? "复习";
+}
 
 function formatDue(now: number, dueAt: number): string {
   const diff = dueAt - now;
@@ -105,7 +113,7 @@ function ReviewCard({
     >
       <header className="rws-card-head">
         <span className={`rws-kind kind-${item.source}`}>
-          {kindLabels[item.kind] ?? "复习"}
+          {reviewKindLabel(item)}
         </span>
         <strong>{item.topic}</strong>
         <span className="rws-due">
@@ -331,7 +339,7 @@ export function ReviewWorkspace({
           复习工作台
         </h2>
         <p>
-          复习项来自真实的测验错题和误区。先自己想，再看提示和答案；用「忘了 / 模糊 / 会了」自评来安排下一次。
+          复习项来自真实的测验错题、误区，以及知识图谱中已有理解证据的命题。图谱命题会先补未核验的前置，再让你不看资料主动复述；用「忘了 / 模糊 / 会了」自评来安排下一次。
         </p>
         <div className="rws-tabs" role="tablist">
           <button
@@ -384,14 +392,14 @@ export function ReviewWorkspace({
           <div className="rws-empty">
             <Timer size={30} aria-hidden="true" />
             <h3>还没有安排中的复习</h3>
-            <p>在测验中答错或出现误区后，复习项会自动出现。</p>
+            <p>在测验中答错、出现误区，或需要主动回忆知识图谱命题时，复习项会出现。</p>
           </div>
         ) : (
           <ul className="rws-upcoming">
             {upcoming.map((item) => (
               <li key={item.id}>
                 <strong>{item.topic}</strong>
-                <span>{kindLabels[item.kind] ?? "复习"}</span>
+                <span>{reviewKindLabel(item)}</span>
                 <small>{formatDue(now, item.dueAt)}</small>
                 <time dateTime={new Date(item.dueAt).toISOString()}>{new Date(item.dueAt).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
                 <button type="button" className="text-button rws-early-button" disabled={busy} onClick={() => setEarlyReviewId(current => current === item.id ? null : item.id)} aria-expanded={earlyReviewId === item.id}>

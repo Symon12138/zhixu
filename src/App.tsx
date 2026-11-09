@@ -22,6 +22,7 @@ import {
   LoaderCircle,
   Menu,
   MessageSquare,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
@@ -71,12 +72,14 @@ import {
 } from "./lib/review";
 import { createDiagnosticProfile, submitDiagnostic } from "./lib/diagnostic";
 import { computePathProgress, describePathProgress } from "./lib/learningPath";
+import { addDependency, emptyGraph, mergeGraphs, upsertProposition } from "./lib/knowledgeGraph";
 import { recordTransferAnswer, syncTransferQuestion } from "./lib/transfer";
 import { TransferPractice } from "./components/TransferPractice";
 import { DiagnosticPanel } from "./components/DiagnosticPanel";
 import { LearningReport } from "./components/LearningReport";
 import { LearningPath } from "./components/LearningPath";
 import { ReviewWorkspace } from "./components/ReviewWorkspace";
+import { KnowledgeGraphView } from "./components/KnowledgeGraphView";
 import "./components/LearningWorkspace.css";
 import { withTabRequestLock } from "./lib/requestLock";
 import {
@@ -107,6 +110,7 @@ import type {
   CloudWorkspace,
   Course,
   DiagnosticProfile,
+  KnowledgeGraph,
   LearningEvidence,
   LearningQuestion,
   LearningState,
@@ -126,7 +130,7 @@ import type {
 
 type LearningStateState = LearningState;
 
-type View = "home" | "study" | "notes" | "review" | "books";
+type View = "home" | "study" | "notes" | "review" | "graph" | "books";
 type StudyTab = "lesson" | "quiz" | "cards" | "workspace";
 type WorkspaceSubView = "path" | "transfer" | "review" | "report";
 type Action = ChatRequest["action"];
@@ -440,6 +444,71 @@ function attachSessionExtras(
   });
 }
 
+/**
+ * 会话步骤核验通过时把该步骤沉淀为图谱命题。
+ * - 只处理从“未核验”升级为 understood/applied，或 understood→applied 的步骤；
+ * - 没有真实证据的步骤一律不沉淀（不凭空生成命题）；
+ * - statement 用 step.title，与服务端规划依赖时的 propositionId(title) 对齐；
+ * - 同概念再次核验由 upsertProposition 合并证据、升级强度并保留较新核验时间。
+ */
+export function harvestSessionPropositions(
+  graph: KnowledgeGraph,
+  session: Pick<StudySession, "id" | "topic">,
+  previous: LearningState | undefined,
+  next: LearningState | undefined,
+  verifiedAt: number,
+): KnowledgeGraph {
+  if (!next) return graph;
+  let result = graph;
+  for (const step of next.steps) {
+    if (
+      (step.mastery !== "understood" && step.mastery !== "applied") ||
+      step.evidence.length === 0
+    )
+      continue;
+    const before = previous?.steps.find((item) => item.id === step.id);
+    const upgraded =
+      step.mastery === "applied"
+        ? before?.mastery !== "applied"
+        : !before ||
+          (before.mastery !== "understood" && before.mastery !== "applied");
+    if (!upgraded) continue;
+    result = upsertProposition(result, {
+      statement: step.title,
+      topic: session.topic,
+      sourceSessionId: session.id,
+      verifiedAt,
+      strength: step.mastery,
+      evidence: step.evidence,
+    });
+  }
+  return result;
+}
+
+/**
+ * 并入服务端规划返回的依赖标注。
+ * 命题按 LWW 合并；依赖逐条走 addDependency，保留去重与防环，
+ * 避免旧请求快照与本地新边合并出逻辑死循环。
+ */
+export function mergeAnnotatedGraph(
+  graph: KnowledgeGraph,
+  update: KnowledgeGraph | undefined,
+): KnowledgeGraph {
+  if (!update) return graph;
+  let result = update.propositions.length
+    ? mergeGraphs(graph, { propositions: update.propositions, dependencies: [] })
+    : graph;
+  for (const dependency of update.dependencies) {
+    result = addDependency(
+      result,
+      dependency.fromId,
+      dependency.toId,
+      dependency.createdAt,
+    );
+  }
+  return result;
+}
+
 function createSession(
   topic: string,
   level: string,
@@ -725,6 +794,8 @@ export default function App() {
   const {
     sessions,
     setSessions,
+    graph,
+    setGraph,
     notes,
     setNotes,
     activity,
@@ -887,6 +958,8 @@ export default function App() {
   notesRef.current = notes;
   const activityRef = useRef(activity);
   activityRef.current = activity;
+  const graphRef = useRef(graph);
+  graphRef.current = graph;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const deletedNoteIdsRef = useRef(deletedNoteIds);
@@ -935,6 +1008,7 @@ export default function App() {
         .map((session) => session.diagnostic)
         .filter((profile): profile is DiagnosticProfile => !!profile),
       activity: activityRef.current,
+      knowledgeGraph: graphRef.current,
       deletedNoteIds: deletedNoteIdsRef.current,
       settingsUpdatedAt: settingsUpdatedAtRef.current,
     };
@@ -956,6 +1030,10 @@ export default function App() {
       notesRef.current = shifted.notes;
       setSessions(shifted.sessions);
       setNotes(shifted.notes);
+      if (shifted.knowledgeGraph) {
+        graphRef.current = shifted.knowledgeGraph;
+        setGraph(shifted.knowledgeGraph);
+      }
       if (shifted.settingsUpdatedAt !== undefined) {
         rememberSettingsUpdatedAt(shifted.settingsUpdatedAt);
       }
@@ -984,6 +1062,7 @@ export default function App() {
       setSessions(attachSessionExtras(merged));
       setNotes(merged.notes);
       setActivity(merged.activity);
+      setGraph(merged.knowledgeGraph);
       rememberDeletedNoteIds(merged.deletedNoteIds);
       const nextSettings = mergeImportedSettings(
         settingsRef.current,
@@ -1043,6 +1122,7 @@ export default function App() {
     setSessions([]);
     setNotes([]);
     setActivity([]);
+    setGraph(emptyGraph());
     setSettings({ ...defaults });
     rememberDeletedNoteIds([]);
     rememberSettingsUpdatedAt(0);
@@ -1306,6 +1386,7 @@ export default function App() {
           setSessions(attachSessionExtras(workspace.data));
           setNotes(workspace.data.notes.filter((note) => !cloudDeleted.has(note.id)));
           setActivity(workspace.data.activity);
+          setGraph(workspace.data.knowledgeGraph ?? emptyGraph());
           rememberDeletedNoteIds(cloudDeletedNoteIds);
           const restoredSettings = mergeImportedSettings(
             { ...defaults },
@@ -1533,7 +1614,7 @@ export default function App() {
     };
   }, [authUser, canUsePersonalKeys, fetcher]);
 
-  // sessions / notes / activity 变化后防抖上传（仅登录后）。
+  // sessions / notes / activity / graph 变化后防抖上传（仅登录后）。
   useEffect(() => {
     if (!authUser) return;
     if (syncTimerRef.current !== null) window.clearTimeout(syncTimerRef.current);
@@ -1547,7 +1628,7 @@ export default function App() {
         syncTimerRef.current = null;
       }
     };
-  }, [sessions, notes, activity, settings, settingsUpdatedAt, deletedNoteIds, authUser]);
+  }, [sessions, notes, activity, graph, settings, settingsUpdatedAt, deletedNoteIds, authUser]);
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(""), 4200);
@@ -2179,6 +2260,10 @@ export default function App() {
         ...(session.learningState
           ? { learningState: session.learningState }
           : {}),
+        // 已掌握命题随请求注入导师上下文；新会话可据此跳过重复教学。
+        ...(graphRef.current.propositions.length || graphRef.current.dependencies.length
+          ? { knowledgeGraph: graphRef.current }
+          : {}),
         references: suppliedReferences,
         ...(webSearchOn && !session.bookContext ? { webSearch: true } : {}),
         ...(session.bookContext ? { bookContext: session.bookContext } : {}),
@@ -2259,6 +2344,23 @@ export default function App() {
           ? { learningState: result.learningState }
           : {}),
       }));
+      // 步骤从“未核验”升级为 understood/applied 时沉淀命题；服务端规划返回的
+      // 依赖标注同时并入图（逐条防环，不清空本地已沉淀内容）。
+      if (result.learningState || result.knowledgeGraph) {
+        const verifiedAt = localNow();
+        setGraph((previous) =>
+          mergeAnnotatedGraph(
+            harvestSessionPropositions(
+              previous,
+              session,
+              session.learningState,
+              result.learningState,
+              verifiedAt,
+            ),
+            result.knowledgeGraph,
+          ),
+        );
+      }
       setApiAvailable(true);
       recordActivity();
       return { response: result, submittedAnswer: text?.trim() || undefined };
@@ -2724,6 +2826,7 @@ export default function App() {
         .filter((profile): profile is DiagnosticProfile => !!profile),
       settingsWithoutSecrets: settingsWithoutSecretsOf(settings),
       activity,
+      knowledgeGraph: graphRef.current,
       deletedNoteIds,
       settingsUpdatedAt,
     });
@@ -2759,6 +2862,7 @@ export default function App() {
             .map((session) => session.diagnostic)
             .filter((profile): profile is DiagnosticProfile => !!profile),
           activity,
+          knowledgeGraph: graphRef.current,
           deletedNoteIds,
           settingsWithoutSecrets: settingsWithoutSecretsOf(settings),
           settingsUpdatedAt,
@@ -2768,6 +2872,7 @@ export default function App() {
       setSessions(attachSessionExtras(merged));
       setNotes(merged.notes);
       setActivity(merged.activity);
+      setGraph(merged.knowledgeGraph);
       rememberDeletedNoteIds(merged.deletedNoteIds);
       const nextSettings = mergeImportedSettings(settings, merged.settingsWithoutSecrets);
       setSettings(nextSettings);
@@ -3144,6 +3249,16 @@ export default function App() {
             <Layers3 size={19} />
             <span>练习与复习</span>
           </button>
+          <button
+            className={view === "graph" ? "active" : ""}
+            onClick={() => navigate("graph")}
+          >
+            <Network size={19} />
+            <span>知识图谱</span>
+            {graph.propositions.length > 0 && (
+              <span className="nav-count">{graph.propositions.length}</span>
+            )}
+          </button>
         </nav>
         <div className="nav-section-label recent-label">
           <span>最近学习</span>
@@ -3281,7 +3396,9 @@ export default function App() {
                 ? "知识笔记"
                 : view === "review"
                   ? "练习与复习"
-                  : view === "books" ? "我的书架" : "学习空间"}
+                  : view === "graph"
+                    ? "知识图谱"
+                    : view === "books" ? "我的书架" : "学习空间"}
             </span>
             {view === "study" && active && (
               <>
@@ -4843,6 +4960,20 @@ export default function App() {
                 </div>
               )}
             </div>
+          )}
+
+          {view === "graph" && (
+            <KnowledgeGraphView
+              graph={graph}
+              sessions={sessions}
+              onOpenSession={(sessionId) => {
+                const target = sessions.find((session) => session.id === sessionId);
+                if (!target) return;
+                ensureReviews(target);
+                openSession(target);
+              }}
+              onStartLearning={() => navigate("home")}
+            />
           )}
         </main>
       </div>
