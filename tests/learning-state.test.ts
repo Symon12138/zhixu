@@ -35,8 +35,9 @@ const reasoning: LearningEvidence = {
   quote: "分红从产品资产转出，累积净值把历史现金加回。",
   questionId: "reasoning-1",
   question: "现金分红从哪里支付？",
-  kind: "reasoning",
+  kind: "derivation",
   turn: 1,
+  chain: { premises: ["分红来自产品资产", "资产减少而现金获得"], conclusion: "分红不是新增收益，而是资产形式转换" },
 };
 
 const transfer: LearningEvidence = {

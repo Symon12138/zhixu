@@ -65,6 +65,9 @@ export interface KnowledgeGraphLayoutNode {
 export interface KnowledgeGraphLayoutEdge {
   fromId: string;
   toId: string;
+  /** 依赖类型与推理规则（图谱依赖边携带时透传，用于详情展示）。 */
+  kind?: "prerequisite" | "derivation";
+  rule?: string;
 }
 
 export interface KnowledgeGraphLayout {
@@ -126,7 +129,12 @@ export function computeKnowledgeGraphLayout(
     const key = `${dependency.fromId}→${dependency.toId}`;
     if (edgeKeys.has(key)) continue;
     edgeKeys.add(key);
-    edges.push({ fromId: dependency.fromId, toId: dependency.toId });
+    edges.push({
+      fromId: dependency.fromId,
+      toId: dependency.toId,
+      ...(dependency.kind ? { kind: dependency.kind } : {}),
+      ...(dependency.rule ? { rule: dependency.rule } : {}),
+    });
   }
 
   const indegree = new Map<string, number>();
@@ -328,12 +336,15 @@ export function KnowledgeGraphView({
   const titleId = `${markerId}-title`;
   const hasDependencies = layout.edges.length > 0;
 
-  const prerequisites = selected
-    ? layout.edges
-        .filter((edge) => edge.toId === selected.id)
-        .map((edge) => propositionById.get(edge.fromId))
-        .filter((item): item is KnowledgeProposition => item !== undefined)
+  const prerequisiteEdges = selected
+    ? layout.edges.filter((edge) => edge.toId === selected.id)
     : [];
+  const prerequisites = prerequisiteEdges
+    .map((edge) => propositionById.get(edge.fromId))
+    .filter((item): item is KnowledgeProposition => item !== undefined);
+  const prerequisiteEdgeById = new Map(
+    prerequisiteEdges.map((edge) => [edge.fromId, edge] as const),
+  );
   const unlocks = selected
     ? layout.edges
         .filter((edge) => edge.fromId === selected.id)
@@ -672,18 +683,27 @@ export function KnowledgeGraphView({
                   </h3>
                   {prerequisites.length > 0 ? (
                     <ul className="kg-related-list">
-                      {prerequisites.map((proposition) => (
-                        <li key={proposition.id}>
-                          <button
-                            type="button"
-                            className="kg-related"
-                            onClick={() => setSelectedId(proposition.id)}
-                          >
-                            <span aria-hidden="true">→</span>
-                            <span>{proposition.statement}</span>
-                          </button>
-                        </li>
-                      ))}
+                      {prerequisites.map((proposition) => {
+                        const edge = prerequisiteEdgeById.get(proposition.id);
+                        return (
+                          <li key={proposition.id}>
+                            <button
+                              type="button"
+                              className="kg-related"
+                              onClick={() => setSelectedId(proposition.id)}
+                            >
+                              <span aria-hidden="true">→</span>
+                              <span>{proposition.statement}</span>
+                            </button>
+                            {edge?.rule && (
+                              <small className="kg-related-rule">
+                                {edge.kind === "derivation" ? "推导：" : "前置："}
+                                {edge.rule}
+                              </small>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   ) : (
                     <p className="kg-detail-empty">暂无标注的前置概念。</p>

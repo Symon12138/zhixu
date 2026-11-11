@@ -128,8 +128,13 @@ function stateWithEvidence(): LearningState {
           {
             quote: "累计净值把历史分红加回来",
             questionId: "s1-q1",
-            kind: "reasoning",
+            question: "为什么累计净值不随分红下降？请推导并给边界。",
+            kind: "derivation",
             turn: 2,
+            chain: {
+              premises: ["分红使产品资产等额减少", "累计口径把历史收益加回"],
+              conclusion: "累计净值不随分红下降",
+            },
           },
         ],
       },
@@ -477,7 +482,7 @@ test("伪造掌握状态拒绝导入：understood/applied 没有推理或迁移�
       },
     ],
   };
-  assert.throws(() => parseBackup(JSON.stringify(recognitionOnly)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据/);
+  assert.throws(() => parseBackup(JSON.stringify(recognitionOnly)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据|完整推导链|独立解释证据/);
 
   const emptyEvidence = backupFixture();
   emptyEvidence.sessions[0].learningState = {
@@ -486,7 +491,7 @@ test("伪造掌握状态拒绝导入：understood/applied 没有推理或迁移�
       { id: "step-1", title: "两种净值的区别", mastery: "applied", evidence: [] },
     ],
   };
-  assert.throws(() => parseBackup(JSON.stringify(emptyEvidence)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据/);
+  assert.throws(() => parseBackup(JSON.stringify(emptyEvidence)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据|完整推导链|独立解释证据/);
 
   const fakeDetour = backupFixture();
   fakeDetour.sessions[0].learningState = {
@@ -511,7 +516,7 @@ test("伪造掌握状态拒绝导入：understood/applied 没有推理或迁移�
       },
     ],
   };
-  assert.throws(() => parseBackup(JSON.stringify(fakeDetour)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据/);
+  assert.throws(() => parseBackup(JSON.stringify(fakeDetour)), /理解状态必须有学习者解释的证据|迁移通过必须有不同问题上的解释和迁移证据|完整推导链|独立解释证据/);
 });
 
 test("真实推理证据的掌握状态可以导入，识别证据不影响 learning 级别", () => {

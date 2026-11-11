@@ -25,6 +25,8 @@ export interface ReviewWorkspaceProps {
   reviews: ReviewItem[];
   /** 复习项可能对应一份原始测验题（提供选项与解析，沿用原题，不另造）。 */
   questionsById?: Record<string, QuizQuestion>;
+  /** 当前仍存在的源会话；缺失的图谱来源会明确保留复习入口。 */
+  availableSessionIds?: ReadonlySet<string>;
   /** 可注入的当前时间（毫秒），便于测试到期；默认取当下。 */
   now?: number;
   busy?: boolean;

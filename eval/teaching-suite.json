@@ -82,6 +82,13 @@
                 "question": "分红前后，产品资产池和客户现金账户各发生什么变化？",
                 "kind": "reasoning",
                 "turn": 3
+              },
+              {
+                "quote": "单位净值下降是因为把已实现的收益以现金分出去。",
+                "questionId": "q-reason-2",
+                "question": "为什么现金分红会让单位净值下降？",
+                "kind": "reasoning",
+                "turn": 4
               }
             ]
           },
@@ -238,6 +245,13 @@
                 "question": "现金分红后，产品资产池和客户现金账户各发生什么变化？",
                 "kind": "reasoning",
                 "turn": 4
+              },
+              {
+                "quote": "累计净值把历史分出的现金加回，所以不随分红减少。",
+                "questionId": "q-reason-3",
+                "question": "累计净值为什么不因现金分红而减少？",
+                "kind": "reasoning",
+                "turn": 5
               }
             ]
           },
@@ -267,6 +281,162 @@
           "action": "message",
           "learner": "单位净值=1.10−0.05=1.02，累计净值=1.10+0.05=1.15。",
           "expect": ["numeric_gate", "no_answer_leak", "no_advance", "misconception_recorded", "evidence_verbatim", "question_identity"]
+        }
+      ]
+    },
+    {
+      "id": "graph-known-continuity",
+      "title": "已掌握命题进入讲解并回传路线依赖",
+      "description": "跨会话图谱已有 applied 命题；开场必须把它当作已掌握背景使用，并返回能落到本次路线的依赖边。",
+      "covers": ["opening_route", "knowledge_graph_continuity"],
+      "topic": "复利与连续复利",
+      "level": "有一些基础",
+      "goal": "理解从复利到连续复利的过渡，并能解释极限形式",
+      "knowledgeGraph": {
+        "propositions": [
+          {
+            "id": "kp_compound",
+            "statement": "复利是本金和已产生的利息一起计息",
+            "topic": "复利",
+            "sourceSessionId": "s-prior",
+            "verifiedAt": 1700000000000,
+            "strength": "applied",
+            "evidence": [
+              {
+                "quote": "每一期的利息也会进入下一期计息。",
+                "questionId": "q-prior",
+                "kind": "reasoning",
+                "turn": 3
+              }
+            ]
+          }
+        ],
+        "dependencies": []
+      },
+      "turns": [
+        {
+          "action": "start",
+          "learner": "我已经会用复利公式，想理解连续复利。",
+          "expect": ["route", "known_proposition_used", "graph_dependency_returned"]
+        }
+      ]
+    },
+    {
+      "id": "book-source-binding",
+      "title": "书籍开场逐字绑定原文",
+      "description": "书籍夹具提供两段原文；开场讲解必须至少给出一条同名原文的逐字引文，不能用模型常识冒充本书内容。",
+      "covers": ["opening_route", "book_grounding"],
+      "topic": "复利",
+      "level": "从零开始",
+      "goal": "能用自己的话解释复利与单利的分界",
+      "bookFixture": {
+        "bookId": "eval-book-1",
+        "title": "给学习者的利息笔记",
+        "author": "评测夹具",
+        "format": "md",
+        "chapterId": "ch-1",
+        "chapterTitle": "第一章 复利",
+        "blocks": [
+          {
+            "id": "b1",
+            "text": "复利与单利的分界，是利息是否进入下一期的计息本金。",
+            "locator": "第1段"
+          },
+          {
+            "id": "b2",
+            "text": "当计息间隔不断缩短，复利结果会逼近一个稳定上限。",
+            "locator": "第2段"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "action": "start",
+          "learner": "请只根据这一章带我理解复利。",
+          "expect": ["route", "book_quote_bound"]
+        }
+      ]
+    },
+    {
+      "id": "web-claim-binding",
+      "title": "网页结论逐字命中已核验引文",
+      "description": "固定网页来源已由程序标记 claim_matched；讲解必须引用逐字命中 verifiedQuote 的原文，并回传相同的核验状态。",
+      "covers": ["opening_route", "web_grounding"],
+      "topic": "复利",
+      "level": "从零开始",
+      "goal": "能结合一份网页资料解释复利的计息方式",
+      "webSearch": true,
+      "references": [
+        {
+          "name": "示例来源：复利定义",
+          "text": "复利是在每个计息期把利息计入本金，再计算下一期利息。",
+          "url": "https://example.org/compound-interest",
+          "retrievedAt": "2026-01-01T00:00:00Z",
+          "verification": "claim_matched",
+          "verifiedQuote": "复利是在每个计息期把利息计入本金，再计算下一期利息。",
+          "sourceTier": "secondary"
+        }
+      ],
+      "turns": [
+        {
+          "action": "start",
+          "learner": "请结合这份网页资料讲讲复利。",
+          "expect": ["route", "web_claim_matched"]
+        }
+      ]
+    },
+    {
+      "id": "graph-review-ready",
+      "title": "已理解命题可生成主动回忆复习",
+      "description": "已有 understood 命题和真实证据时，知识图谱必须能生成可追溯的主动回忆复习项；不能把已应用概念误当待复习项。",
+      "covers": ["graph_review_generation"],
+      "topic": "复利",
+      "level": "有一些基础",
+      "goal": "能从复利机制过渡到连续复利并安排复习",
+      "seed": {
+        "goal": "能从复利机制过渡到连续复利并安排复习",
+        "revision": 4,
+        "steps": [
+          {
+            "id": "step-1",
+            "title": "复利是本金和利息一起计息",
+            "mastery": "understood",
+            "evidence": [
+              {
+                "quote": "利息进入下一期本金，所以增长比单利快。",
+                "questionId": "q-reason-1",
+                "question": "为什么复利的增长会快于单利？",
+                "kind": "reasoning",
+                "turn": 2
+              },
+              {
+                "quote": "每一期新增的利息也会成为下一期的计息本金。",
+                "questionId": "q-reason-2",
+                "question": "复利中新增的利息去了哪里？",
+                "kind": "reasoning",
+                "turn": 3
+              }
+            ]
+          },
+          { "id": "step-2", "title": "连续复利是计息间隔趋近于零的极限", "mastery": "learning" },
+          { "id": "step-3", "title": "在新情境中估算连续复利", "mastery": "new" }
+        ],
+        "currentStepId": "step-1",
+        "pendingQuestion": {
+          "id": "q-explain-1",
+          "stepId": "step-1",
+          "prompt": "用自己的话说说复利与单利的差别。",
+          "kind": "reasoning",
+          "options": [],
+          "successCriteria": ["利息进入本金", "增长速度更快"],
+          "scope": "main"
+        }
+      },
+      "turns": [
+        {
+          "action": "continue",
+          "learner": "",
+          "expect": ["graph_review_generated"]
         }
       ]
     }

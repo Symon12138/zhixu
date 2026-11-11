@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
-import type { ChatRequest, ServerConfig } from "../src/types";
+import { isAttachmentMeta } from "../src/lib/attachments";
+import type { AttachmentImage, ChatRequest, ServerConfig } from "../src/types";
 import { isKnowledgeGraph } from "../src/lib/backup";
 import { ApiError, chatCompletion, resolveEnvStatus, validateModelConfig } from "./ai";
 import { attachUser, registerAuthRoutes, requireAuth } from "./auth";
@@ -22,6 +23,7 @@ import {
 } from "./http";
 import { UserCredentialStore, registerCredentialRoutes } from "./credentials";
 import { acquireAiConcurrency, enforceQuota } from "./quota";
+import { ResearchManager, ResearchValidationError, parseResearchCreate, toAttachItems } from "./research";
 import {
   isLibraryBodyRoute,
   isLibraryDeleteRoute,
@@ -41,6 +43,9 @@ import { webSearchEnabled, searchProvidersFromSettings } from "./webSearch";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+
+// 构建版本：直接读 package.json，发布 tag 与之同步；/api/version 对外暴露。
+const SERVER_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 // ── 输入校验 ─────────────────────────────────────────────────────────────
 const MAX_MESSAGE_CHARS = 24_000;
 const MAX_MESSAGES = 200;
@@ -60,7 +65,7 @@ function asTrimmedString(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() : undefined;
 }
 
-function validateChatRequest(body: unknown): ChatRequest {
+export function validateChatRequest(body: unknown): ChatRequest {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new ApiError(400, "请求体必须是一个 JSON 对象。");
   }
@@ -173,6 +178,10 @@ function validateChatRequest(body: unknown): ChatRequest {
         ref.sourceTier === "official" || ref.sourceTier === "primary" || ref.sourceTier === "secondary" || ref.sourceTier === "unknown"
           ? ref.sourceTier
           : undefined;
+      // 附件元数据：只收形状校验后的 id/name/kind/mimeType/byteLength，
+      // 二进制与 base64 均不在 references 里传输（图片随消息 image_url/inlineData 通道）。
+      const attachmentMeta =
+        isAttachmentMeta(ref.attachment) ? ref.attachment : undefined;
       return {
         name,
         text,
@@ -185,7 +194,35 @@ function validateChatRequest(body: unknown): ChatRequest {
         ...(verification ? { verification } : {}),
         ...(verifiedQuote ? { verifiedQuote } : {}),
         ...(sourceTier ? { sourceTier } : {}),
+        ...(attachmentMeta ? { attachment: attachmentMeta } : {}),
       };
+    });
+  }
+
+  // 附件图片 dataURL：最多 4 张、只接受 data:image/…;base64 形态、
+  // 解码后各 ≤2MB（客户端 inline 上限），总量守住请求体预算。
+  let attachmentImages: ChatRequest["attachmentImages"] = undefined;
+  if (b.attachmentImages !== undefined && b.attachmentImages !== null) {
+    if (!Array.isArray(b.attachmentImages) || b.attachmentImages.length > 4) {
+      throw new ApiError(400, "attachmentImages 必须是数组，且最多 4 张图片。");
+    }
+    attachmentImages = (b.attachmentImages as unknown[]).map((image, i): AttachmentImage => {
+      if (!image || typeof image !== "object") {
+        throw new ApiError(400, `第 ${i + 1} 张附件图片格式不正确。`);
+      }
+      const record = image as Record<string, unknown>;
+      if (typeof record.id !== "string" || !record.id || record.id.length > 100) {
+        throw new ApiError(400, `第 ${i + 1} 张附件图片缺少有效 id。`);
+      }
+      const dataUrl = record.dataUrl;
+      if (typeof dataUrl !== "string") throw new ApiError(400, `第 ${i + 1} 张附件图片缺少 dataUrl。`);
+      const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+      if (!match) throw new ApiError(400, `第 ${i + 1} 张附件图片不是合法的 data:image PNG/JPEG/WebP dataURL。`);
+      const decodedBytes = Math.floor((match[2].length * 3) / 4);
+      if (decodedBytes > 2 * 1024 * 1024) {
+        throw new ApiError(400, `第 ${i + 1} 张附件图片超过 2 MB 内联上限，请压缩后再上传。`);
+      }
+      return { id: record.id, dataUrl };
     });
   }
 
@@ -233,6 +270,7 @@ function validateChatRequest(body: unknown): ChatRequest {
     messages: normalizedMessages,
     action,
     references,
+    ...(attachmentImages?.length ? { attachmentImages } : {}),
     ...(b.webSearch === true ? { webSearch: true } : {}),
     learningState,
     ...(bookContext ? { bookContext } : {}),
@@ -298,6 +336,9 @@ export function createApp(options: CreateAppOptions): Express {
   // 工作区与书架的写请求体由各自路由在鉴权/限流/并发门禁之后解析；
   // 其余请求仍使用 1 MB 上限，避免在门禁前读取 25 MB / 30 MB。
   const parseDefaultJson = express.json({ limit: BODY_LIMIT, inflate: false });
+  // 对话请求可能携带 ≤2MB 图片的 base64（约 2.8 MB JSON），
+  // 与其他默认路由同样在守卫之后解析，只是上限提到 3 MB。
+  const parseChatJson = express.json({ limit: "3mb", inflate: false });
   app.use((req, res, next) => {
     if (isLibraryBodyRoute(req)) {
       next();
@@ -306,6 +347,10 @@ export function createApp(options: CreateAppOptions): Express {
     const pathname = req.path.replace(/\/+$/, "").toLowerCase();
     if (req.method === "PUT" && pathname === "/api/workspace") {
       next();
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/chat") {
+      parseChatJson(req, res, next);
       return;
     }
     parseDefaultJson(req, res, next);
@@ -320,6 +365,16 @@ export function createApp(options: CreateAppOptions): Express {
       webSearchEnabled: webSearchEnabled(),
     };
     res.json(status);
+  });
+
+  // ── GET /api/version：构建版本与发布说明链接（更新提示用，不含机密）─────
+  app.get("/api/version", (_req, res) => {
+    res.json({
+      version: SERVER_VERSION,
+      name: "zhixu",
+      releaseNotes: "https://github.com/Symon12138/zhixu/releases",
+      time: Date.now(),
+    });
   });
 
   // ── 健康检查：health 只看进程，ready 还要求数据库可用 ───────────────────
@@ -352,6 +407,7 @@ export function createApp(options: CreateAppOptions): Express {
   registerWorkspaceRoutes(api, db);
   registerLibraryRoutes(api, db);
   registerCredentialRoutes(api, config, db, credentialStore);
+  const researchManager = new ResearchManager(db);
   app.use("/api", api);
 
   // ── 模型调用：认证、并发闸门、BYOK 策略、每日额度 ───────────────────────
@@ -564,6 +620,45 @@ export function createApp(options: CreateAppOptions): Express {
       }
       writeErrorResponse(res, error);
     }
+  });
+
+  // ── 后台研究：创建后异步执行，不阻塞教学回合；结果可挂为下一轮资料 ──
+  app.post("/api/research", ...webAuth, (req, res) => {
+    try {
+      if (!enforceQuota(req, res, db, config.quotas, "chat")) return;
+      const input = parseResearchCreate(req.body);
+      const job = researchManager.create(req, input);
+      auditRequest(db, req, "research.create", "ok", job.jobId);
+      res.status(202).json(job);
+    } catch (error) {
+      if (error instanceof ResearchValidationError) {
+        res.status(error.status).json({ error: error.message, code: error.code });
+        return;
+      }
+      writeErrorResponse(res, error);
+    }
+  });
+
+  app.get("/api/research/:id", ...webAuth, (req, res) => {
+    const job = researchManager.snapshot(String(req.params.id));
+    if (!job) {
+      res.status(404).json({ error: "研究任务不存在或已过期。", code: "research_not_found" });
+      return;
+    }
+    if (config.authRequired && job.ownerId !== req.authUser?.id) {
+      res.status(403).json({ error: "无权查看该研究任务。" });
+      return;
+    }
+    res.json({ ...job, attachItems: toAttachItems(job) });
+  });
+
+  app.post("/api/research/:id/cancel", ...webAuth, (req, res) => {
+    const result = researchManager.cancel(String(req.params.id));
+    if (result === "not_found") {
+      res.status(404).json({ error: "研究任务不存在或已过期。", code: "research_not_found" });
+      return;
+    }
+    res.json({ ok: true, status: result });
   });
 
   app.post("/api/diagnostic", ...aiAuth, accountBinding(), aiConcurrency, async (req, res) => {

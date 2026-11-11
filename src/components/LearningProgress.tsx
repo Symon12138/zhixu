@@ -52,6 +52,7 @@ export const masteryLabels: Record<MasteryLevel, string> = {
 export const evidenceKindLabels: Record<EvidenceKind, string> = {
   recognition: "辨认",
   reasoning: "推理",
+  derivation: "推导",
   transfer: "迁移",
 };
 
@@ -59,6 +60,7 @@ const questionKindLabels: Record<QuestionKind, string> = {
   orientation: "方向选择",
   diagnostic: "理解诊断",
   reasoning: "推理题",
+  derivation: "推导题",
   calculation: "计算题",
   transfer: "迁移题",
   choice: "选择题",
@@ -421,6 +423,14 @@ export function TeachingReceiptCard({
                 {quality.reviewAttempts !== undefined && `，其中独立评审 ${quality.reviewAttempts} 次`}
                 {quality.repaired && "；讲解经修订后发布"}。
               </p>
+              {quality.usage && (
+                <p>
+                  本轮约 {quality.usage.inputTokens + quality.usage.outputTokens} tokens
+                  （输入 {quality.usage.inputTokens} · 输出 {quality.usage.outputTokens}
+                  {quality.usage.cachedTokens !== undefined && ` · 缓存命中 ${quality.usage.cachedTokens}`}），
+                  由供应商返回的用量估算，不等于实际计费。
+                </p>
+              )}
               <p>
                 {quality.grounding === "provided_material"
                   ? "讲解依据来自你上传的材料原文。"

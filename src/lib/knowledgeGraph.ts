@@ -36,10 +36,31 @@ export function propositionId(statement: string): string {
   return `kp_${(hash >>> 0).toString(36)}`;
 }
 
+/**
+ * 主题命名空间命题 id：同一 statement 在不同主题下是不同节点，
+ * 避免「同名步骤标题」跨主题被误合并为一个概念。
+ */
+export function namespacedPropositionId(
+  statement: string,
+  topic: string,
+): string {
+  const namespace = normalizeStatement(topic);
+  const normalized = normalizeStatement(statement);
+  let hash = 0x811c9dc5;
+  const combined = `${namespace}\u0000${normalized}`;
+  for (let i = 0; i < combined.length; i += 1) {
+    hash ^= combined.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `kp_${(hash >>> 0).toString(36)}`;
+}
+
 /** 从会话证据沉淀一个命题节点（幂等：同 id 已存在则合并证据与较新核验）。 */
 export function upsertProposition(
   graph: KnowledgeGraph,
   input: {
+    /** 显式命题 id（如 namespacedPropositionId 生成值）；缺省按内容散列。 */
+    id?: string;
     statement: string;
     topic: string;
     sourceSessionId: string;
@@ -48,7 +69,7 @@ export function upsertProposition(
     evidence: LearningEvidence[];
   },
 ): KnowledgeGraph {
-  const id = propositionId(input.statement);
+  const id = input.id ?? propositionId(input.statement);
   const existing = graph.propositions.find((p) => p.id === id);
   const evidence = dedupeEvidence([...(existing?.evidence ?? []), ...input.evidence]);
   const strength: KnowledgeProposition["strength"] =
@@ -69,20 +90,31 @@ export function upsertProposition(
   return { propositions, dependencies: graph.dependencies };
 }
 
-/** 添加依赖边（去重、拒绝自环与成环）。 */
+/** 添加依赖边（去重、拒绝自环与成环）。kind/rule 保留模型标注。 */
 export function addDependency(
   graph: KnowledgeGraph,
   fromId: string,
   toId: string,
   createdAt: number,
+  extra?: { kind?: KnowledgeDependency["kind"]; rule?: string },
 ): KnowledgeGraph {
   if (fromId === toId) return graph;
-  if (graph.dependencies.some((d) => d.fromId === fromId && d.toId === toId)) return graph;
+  if (graph.dependencies.some((d) => d.fromId === fromId && d.toId === toId))
+    return graph;
   // 拒绝会成环的边：toId 已能到达 fromId 时 fromId->toId 成环。
   if (reachable(graph, toId, fromId)) return graph;
   return {
     propositions: graph.propositions,
-    dependencies: [...graph.dependencies, { fromId, toId, createdAt }],
+    dependencies: [
+      ...graph.dependencies,
+      {
+        fromId,
+        toId,
+        createdAt,
+        ...(extra?.kind ? { kind: extra.kind } : {}),
+        ...(extra?.rule ? { rule: extra.rule } : {}),
+      },
+    ],
   };
 }
 

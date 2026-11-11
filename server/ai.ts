@@ -1,6 +1,7 @@
 import type {
   ChatRequest,
   ChatResponse,
+  ModelUsage,
   Provider,
   ProviderSettings,
   ThinkingLevel,
@@ -88,7 +89,11 @@ function upstreamErrorMessage(
   const detail = reason ? `：${reason}` : "。";
   return `AI 服务返回错误（HTTP ${status}）${detail}${
     config.structuredOutput && status === 400 ? STRUCTURED_OUTPUT_HINT : ""
-  }${config.thinkingLevel !== "auto" && status === 400 ? THINKING_LEVEL_HINT : ""}`;
+  }${config.thinkingLevel !== "auto" && status === 400 ? THINKING_LEVEL_HINT : ""}${
+    status === 400 || status === 404 || status === 422
+      ? ` 若本轮带了图片附件，也可能是当前模型或端点不支持视觉输入；换用多模态模型后重试。`
+      : ""
+  }`;
 }
 
 /** 读取上游响应体；中途断开同样属于连接故障，必须保留可读原因并允许故障转移。 */
@@ -299,6 +304,38 @@ export function resolveEnvStatus(): {
 interface HistoryTurn {
   role: "user" | "assistant";
   content: string;
+  /** 图片附件：dataURL（data:<mime>;base64,<...>），随该轮用户消息一起发送。 */
+  imageDataUrls?: string[];
+}
+
+/**
+ * dataURL → Gemini inlineData part。仅接受合法的 data:<mime>;base64,<...> 形态；
+ * mime 限定为图片，避免把其他类型塞进视觉通道。
+ */
+export function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } {
+  const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
+  if (!match) throw new ApiError(400, `附件图片格式不合法，无法发送给模型。`, { code: "invalid_image_data" });
+  return { mimeType: match[1], data: match[2] };
+}
+
+/**
+ * 带 图片的消息映射为 OpenAI content 数组：首段文本 + image_url（data URL）。
+ * 无图片的轮次保持纯字符串 content，与旧端点完全兼容。
+ */
+export function historyToOpenAiMessage(turn: HistoryTurn): {
+  role: "user" | "assistant";
+  content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+} {
+  if (!turn.imageDataUrls?.length || turn.role !== "user") {
+    return { role: turn.role, content: turn.content };
+  }
+  return {
+    role: "user",
+    content: [
+      { type: "text", text: turn.content },
+      ...turn.imageDataUrls.map(url => ({ type: "image_url" as const, image_url: { url } })),
+    ],
+  };
 }
 
 function geminiText(parsed: unknown): string {
@@ -394,17 +431,56 @@ function openAiThinkingConfig(config: ResolvedConfig): Record<string, unknown> {
   return { reasoning_effort: config.thinkingLevel };
 }
 
+/** Gemini usageMetadata → ModelUsage；缺失返回 undefined。 */
+function parseGeminiUsage(parsed: unknown): ModelUsage | undefined {
+  const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  const usage = record.usageMetadata && typeof record.usageMetadata === "object"
+    ? record.usageMetadata as Record<string, unknown> : undefined;
+  if (!usage) return undefined;
+  const inputTokens = Number(usage.promptTokenCount ?? usage.prompt_token_count);
+  const outputTokens = Number(usage.candidatesTokenCount ?? usage.candidates_token_count);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return undefined;
+  const cached = Number(usage.cachedContentTokenCount ?? usage.cached_content_token_count);
+  return {
+    inputTokens,
+    outputTokens,
+    ...(Number.isFinite(cached) ? { cachedTokens: cached } : {}),
+  };
+}
+
+/** OpenAI usage → ModelUsage；缺失返回 undefined。 */
+function parseOpenaiUsage(parsed: unknown): ModelUsage | undefined {
+  const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  const usage = record.usage && typeof record.usage === "object"
+    ? record.usage as Record<string, unknown> : undefined;
+  if (!usage) return undefined;
+  const inputTokens = Number(usage.prompt_tokens);
+  const outputTokens = Number(usage.completion_tokens);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return undefined;
+  const details = usage.prompt_tokens_details && typeof usage.prompt_tokens_details === "object"
+    ? usage.prompt_tokens_details as Record<string, unknown> : undefined;
+  const cached = Number(details?.cached_tokens);
+  return {
+    inputTokens,
+    outputTokens,
+    ...(Number.isFinite(cached) && cached > 0 ? { cachedTokens: cached } : {}),
+  };
+}
+
 async function callGemini(
   config: ResolvedConfig,
   system: string,
   history: HistoryTurn[],
   signal: AbortSignal,
   temperature: number,
-): Promise<string> {
+): Promise<{ text: string; usage?: ModelUsage }> {
   const url = `${config.baseUrl}/models/${encodeURIComponent(config.model)}:generateContent`;
   const contents = history.map((turn) => ({
     role: turn.role === "assistant" ? "model" : "user",
-    parts: [{ text: turn.content }],
+    parts: [
+      { text: turn.content },
+      ...(turn.imageDataUrls ?? []).map((dataUrl) => ({ inlineData: dataUrlToInline(dataUrl) })),
+    ],
   }));
   let res: Response;
   try {
@@ -450,7 +526,7 @@ async function callGemini(
   } catch {
     throw new ApiError(502, "AI 服务返回了无法解析的响应，请重试。", { code: "upstream_malformed" });
   }
-  return geminiText(parsed);
+  return { text: geminiText(parsed), usage: parseGeminiUsage(parsed) };
 }
 
 async function callOpenAI(
@@ -459,7 +535,7 @@ async function callOpenAI(
   history: HistoryTurn[],
   signal: AbortSignal,
   temperature: number,
-): Promise<string> {
+): Promise<{ text: string; usage?: ModelUsage }> {
   const url = `${config.baseUrl}/chat/completions`;
   let res: Response;
   try {
@@ -471,7 +547,10 @@ async function callOpenAI(
       },
       body: JSON.stringify({
         model: config.model,
-        messages: [{ role: "system", content: system }, ...history],
+        messages: [
+          { role: "system", content: system },
+          ...history.map(historyToOpenAiMessage),
+        ],
         temperature,
         max_tokens: getModelMaxOutputTokens(),
         ...(config.structuredOutput
@@ -524,11 +603,18 @@ async function callOpenAI(
       : "请提高 AI_MAX_OUTPUT_TOKENS，或在模型设置中降低思考等级后重试。";
     throw new ApiError(502, `AI 服务输出达到 ${limit} token 上限，思维链或回答被截断。${advice}`, { code: "upstream_output_truncated" });
   }
-  return openaiText(parsed);
+  return { text: openaiText(parsed), usage: parseOpenaiUsage(parsed) };
 }
 
-/** 组装教学质量编排使用的模型调用器：每次调用受传入 signal 与固定超时双重约束。 */
-export function createModelInvoker(config: ResolvedConfig): ModelInvoker {
+/** 组装教学质量编排使用的模型调用器：每次调用受传入 signal 与固定超时双重约束。
+ * onUsage 可选收集每次调用的 token 用量（供应商返回时），供编排层聚合进 quality。
+ * imageOptions.imageDataUrls 存在时，图片只并入最后一条用户消息（学习者本轮输入），
+ * 草稿、评审、修订等编排消息与历史 assistant 轮次都保持纯文本。 */
+export function createModelInvoker(
+  config: ResolvedConfig,
+  onUsage?: (usage: ModelUsage) => void,
+  imageOptions?: { imageDataUrls?: string[] },
+): ModelInvoker {
   return async (input: ModelInvocation): Promise<string> => {
     const timeoutMs = getModelCallTimeoutMs();
     const timeout = AbortSignal.timeout(timeoutMs);
@@ -537,11 +623,22 @@ export function createModelInvoker(config: ResolvedConfig): ModelInvoker {
       role: turn.role,
       content: turn.content,
     }));
+    if (imageOptions?.imageDataUrls?.length) {
+      const lastUser = findLastIndex(history, turn => turn.role === "user");
+      if (lastUser >= 0) {
+        history[lastUser] = {
+          ...history[lastUser],
+          imageDataUrls: imageOptions.imageDataUrls,
+        };
+      }
+    }
     const temperature = input.purpose === "review" ? 0 : 0.4;
     try {
-      return await (config.provider === "gemini"
+      const result = await (config.provider === "gemini"
         ? callGemini(config, input.system, history, signal, temperature)
         : callOpenAI(config, input.system, history, signal, temperature));
+      if (result.usage) onUsage?.(result.usage);
+      return result.text;
     } catch (error) {
       // 客户端/编排层取消必须原样传播；仅固定调用超时属于供应商连接故障，允许故障转移。
       if (input.signal.aborted) throw input.signal.reason ?? error;
@@ -558,6 +655,13 @@ export function createModelInvoker(config: ResolvedConfig): ModelInvoker {
   };
 }
 
+function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index])) return index;
+  }
+  return -1;
+}
+
 export interface TeachingPipeline {
   invoke: ModelInvoker;
   maxWriterRevisions: number;
@@ -571,18 +675,19 @@ export interface TeachingPipeline {
  */
 export function createTeachingPipeline(
   config: ResolvedConfig,
-  options?: { useReviewer?: boolean },
+  options?: { useReviewer?: boolean; onUsage?: (usage: ModelUsage) => void; imageDataUrls?: string[] },
 ): TeachingPipeline {
-  const writer = createModelInvoker(config);
+  const writer = createModelInvoker(config, options?.onUsage, { imageDataUrls: options?.imageDataUrls });
   const reviewModel = options?.useReviewer === false ? "" : cleanEnv(process.env.AI_REVIEW_MODEL);
   if (!reviewModel || reviewModel === config.model) {
     return { invoke: writer, maxWriterRevisions: 1 };
   }
+  // 评审模型只核对草稿文本，不重复接收图片，避免视觉评审重复计费。
   const reviewer = createModelInvoker({
     ...config,
     model: reviewModel,
     thinkingLevel: normalizeThinkingLevel(process.env.AI_REVIEW_THINKING_LEVEL),
-  });
+  }, options?.onUsage);
   return {
     invoke: (input) => input.purpose === "review" ? reviewer(input) : writer(input),
     maxWriterRevisions: 2,
@@ -624,6 +729,7 @@ function withModelUsage(
   response: ChatResponse,
   model: string,
   fallback: boolean,
+  usage?: ModelUsage,
 ): ChatResponse {
   if (!response.quality) return response;
   return {
@@ -632,6 +738,7 @@ function withModelUsage(
       ...response.quality,
       model,
       fallback,
+      ...(usage ? { usage } : {}),
     },
   };
 }
@@ -681,15 +788,28 @@ export async function chatCompletion(
     const profile = profiles[index];
     try {
       const config = resolveConfig(profile);
+      // 每个模型配置独立聚合本轮 token 用量；供应商未返回时保持缺省。
+      let usage: ModelUsage | undefined;
       const pipeline = createTeachingPipeline(config, {
         // 网页临时密钥只发送到用户选择的模型；服务端评审模型不额外接管 BYOK 请求。
         useReviewer: !profile.apiKey?.trim(),
+        // 附件图片只在草稿调用中直传给视觉模型；大小与形状已在 HTTP 层校验。
+        imageDataUrls: (request.attachmentImages ?? []).map(image => image.dataUrl),
+        onUsage: (call) => {
+          usage = usage === undefined
+            ? { ...call }
+            : {
+                inputTokens: usage.inputTokens + call.inputTokens,
+                outputTokens: usage.outputTokens + call.outputTokens,
+                cachedTokens: (usage.cachedTokens ?? 0) + (call.cachedTokens ?? 0),
+              };
+        },
       });
       const response = await runTeachingTurn(request, pipeline.invoke, {
         signal: options?.signal,
         maxWriterRevisions: pipeline.maxWriterRevisions,
       });
-      return withModelUsage(response, config.model, index > 0);
+      return withModelUsage(response, config.model, index > 0, usage);
     } catch (error) {
       lastError = error;
       if (!isModelFailover(error)) throw error;

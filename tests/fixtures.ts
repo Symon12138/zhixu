@@ -21,9 +21,13 @@ export function stateWithQuestion(mastered = false): LearningState {
               {
                 quote: "分红从产品资产中转出，进入客户现金账户。",
                 questionId: "earlier-reasoning",
-                question: "现金分红从哪里支付？",
-                kind: "reasoning",
+                question: "现金分红从哪里支付？请从前提推导并给边界。",
+                kind: "derivation",
                 turn: 1,
+                chain: {
+                  premises: ["分红来自产品资产池的已实现收益", "现金支付使资产池价值减少"],
+                  conclusion: "分红是资产形式转换，不是新增收益",
+                },
               },
             ]
           : [],

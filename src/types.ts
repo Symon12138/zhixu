@@ -85,6 +85,8 @@ export interface ChatMessage {
   failureMessage?: string;
   teaching?: TeachingReceipt;
   quality?: TeachingQuality;
+  /** 本轮可视化产物；随助手消息持久化，重新打开会话仍可查看。 */
+  artifact?: LessonArtifact;
 }
 
 export type WebReferenceVerification = "page_fetched" | "claim_matched" | "search_snippet";
@@ -107,6 +109,23 @@ export interface Reference {
   verifiedQuote?: string;
   /** 仅按域名启发式分级，不是权威认证。 */
   sourceTier?: WebSourceTier;
+  /**
+   * 图片/PDF 附件元数据。二进制本体只存浏览器 IndexedDB（按 sessionId 隔离），
+   * 绝不进入 sessions 持久化 JSON、备份或云同步；请求只携带元数据与（≤2MB 图片的）base64。
+   */
+  attachment?: AttachmentMeta;
+}
+
+/**
+ * 附件元数据：描述一个进入学习对话的图片或 PDF。
+ * kind=pdf 的 Reference.text 为已抽取的文本层；扫描件无文本层时在客户端即被拒收。
+ */
+export interface AttachmentMeta {
+  id: string;
+  name: string;
+  kind: "image" | "pdf";
+  mimeType: string;
+  byteLength: number;
 }
 
 export interface ChatRequest {
@@ -126,6 +145,11 @@ export interface ChatRequest {
     | "flashcards"
     | "resume";
   references?: Reference[];
+  /**
+   * 附件图片的 dataURL（data:image/…;base64,…），≤2MB 图片由客户端内联直传。
+   * 服务端把它们并入最后一条用户消息发给视觉模型；references 里只有元数据。
+   */
+  attachmentImages?: AttachmentImage[];
   /** 本轮先调用内部搜索供应商链，再把搜索摘要片段作为参考资料。 */
   webSearch?: boolean;
   learningState?: LearningState;
@@ -135,6 +159,26 @@ export interface ChatRequest {
    * 规划新路线时也在其上追加依赖边。旧客户端不传仍合法。
    */
   knowledgeGraph?: KnowledgeGraph;
+}
+
+/** 随请求直传的图片附件（dataURL 形态）。 */
+export interface AttachmentImage {
+  id: string;
+  dataUrl: string;
+}
+
+/** 可视化产物内容大小上限（字节）：UTF-8 编码后不得超过此值。 */
+export const ARTIFACT_MAX_BYTES = 24 * 1024;
+
+/** 本轮讲解的可视化产物：SVG 图形或离线 HTML 演示。由导师按需生成，内容经服务端质量门禁。 */
+export interface LessonArtifact {
+  kind: "svg" | "html";
+  title: string;
+  content: string;
+  /** 逐字来自本轮可用材料的来源名称；无材料时为空数组。 */
+  sources: string[];
+  /** 无障碍文本替代：概括图形/演示所表达的内容，不能为空。 */
+  textAlternative: string;
 }
 
 export interface ChatResponse {
@@ -151,6 +195,13 @@ export interface ChatResponse {
    * 客户端只用 mergeGraphs/addDependency 并入本机图谱，不整包覆盖本地已沉淀命题。
    */
   knowledgeGraph?: KnowledgeGraph;
+  /**
+   * 本轮路线规划的原子命题声明（stepTitle 逐字匹配 plan）。
+   * 客户端在步骤核验通过时按声明沉淀原子命题；无声明时回退用步骤标题。
+   */
+  claims?: StepClaim[];
+  /** 本轮按需生成的可视化产物；不存在时不渲染。 */
+  artifact?: LessonArtifact;
 }
 
 export interface ServerConfig {
@@ -355,11 +406,12 @@ export type AssessmentVerdict =
   | "incorrect"
   | "partial"
   | "correct";
-export type EvidenceKind = "recognition" | "reasoning" | "transfer";
+export type EvidenceKind = "recognition" | "reasoning" | "derivation" | "transfer";
 export type QuestionKind =
   | "orientation"
   | "diagnostic"
   | "reasoning"
+  | "derivation"
   | "calculation"
   | "transfer"
   | "choice";
@@ -369,6 +421,8 @@ export interface LearningEvidence {
   questionId: string;
   question?: string;
   kind: EvidenceKind;
+  /** 独立评审抽取的推导链；旧证据没有该字段。 */
+  chain?: { premises: string[]; conclusion: string };
   turn: number;
 }
 
@@ -484,7 +538,17 @@ export interface TeachingQuality {
   grounding: "provided_material" | "model_knowledge";
   formatRepairs?: string[];
   reviewAttempts?: number;
+  /** 本轮模型调用的 token 用量合计；供应商未返回时缺省。 */
+  usage?: ModelUsage;
   limitations: string[];
+}
+
+/** 单轮教学所有模型调用的 token 用量合计（供应商响应解析所得，仅估算）。 */
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** 命中缓存的输入 token（Gemini cachedContentTokenCount / OpenAI cached_tokens）。 */
+  cachedTokens?: number;
 }
 
 /* ── 知识图谱：跨会话沉淀的命题与依赖 ───────────────────────────── */
@@ -511,18 +575,88 @@ export interface KnowledgeProposition {
 }
 
 /**
- * 依赖边：proposition fromId 是理解 toId 的前提。
- * 由导师模型在规划路线时标注，表示"先懂 fromId 才能懂 toId"。
+ * 依赖边：fromId 是理解 toId 的前提（prerequisite，先懂 from 再学 to），
+ * 或 from 能推导出 to（derivation，由 from 沿规则推出 to）。
+ * 由导师模型在规划路线时标注；derivation 边必须给出 rule。
  */
+export type KnowledgeDependencyKind = "prerequisite" | "derivation";
+
 export interface KnowledgeDependency {
   fromId: string;
   toId: string;
   /** 依赖标注时间。 */
   createdAt: number;
+  /** 依赖类型：prerequisite=前置，derivation=推导；缺省 prerequisite。 */
+  kind?: KnowledgeDependencyKind;
+  /** 一句话说明 from 如何推出 to；derivation 边必填。 */
+  rule?: string;
+}
+
+/** 导师草稿的原子命题声明：把一个步骤拆成可判定真假的陈述句。 */
+export interface StepClaim {
+  /** 所属步骤的标题，必须与 plan 中的步骤逐字一致。 */
+  stepTitle: string;
+  /** 原子命题：一句可判定真假的陈述句。 */
+  statement: string;
 }
 
 /** 知识图谱快照：命题 + 依赖，随工作区同步与备份。 */
 export interface KnowledgeGraph {
   propositions: KnowledgeProposition[];
   dependencies: KnowledgeDependency[];
+}
+
+/* ── C3 后台研究任务（单节点内存，不持久化，进程重启即丢失） ─────────── */
+
+/** 后台研究任务状态机：pending→running→done / failed / cancelled。 */
+export type ResearchJobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+/**
+ * 后台研究产出的一条来源证据。与 `Reference` 同构但独立，避免把研究任务的
+ * 中间产物误当作已挂入教学回合的资料；`quote` 为逐字来自页面/摘要的引文。
+ */
+export interface ResearchEvidence {
+  /** 公开 HTTPS 来源地址。 */
+  url: string;
+  /** 抓取或搜索命中时间（ISO 8601）。 */
+  retrievedAt: string;
+  /** 逐字引文：来自搜索摘要或抓取页面原文，绝不臆造。 */
+  quote: string;
+  /** 域名启发式分级，不是权威认证。 */
+  sourceTier: WebSourceTier;
+  /** 来源标题（页面标题或搜索结果标题）。 */
+  title: string;
+  /** 核验方式：search_snippet=搜索摘要，page_fetched/claim_matched=已抓取页面。 */
+  verification: WebReferenceVerification;
+}
+
+/** 后台研究任务的对外快照（GET /api/research/:id 的响应体）。 */
+export interface ResearchJob {
+  jobId: string;
+  status: ResearchJobStatus;
+  query: string;
+  maxSources: number;
+  ownerId: string | null;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: ResearchEvidence[];
+  error?: string;
+}
+
+/** POST /api/research 的响应体。 */
+export interface CreateResearchResponse {
+  jobId: string;
+  status: ResearchJobStatus;
+}
+
+/** 把研究结果挂入教学回合时可复用的最小资料项（供调用方接线）。 */
+export interface ResearchAttachItem {
+  name: string;
+  text: string;
+  url: string;
+  retrievedAt: string;
+  sourceTier: WebSourceTier;
+  verification: WebReferenceVerification;
+  verifiedQuote?: string;
 }

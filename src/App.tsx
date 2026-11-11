@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -43,6 +43,7 @@ import {
   TeachingReceiptCard,
   masteryLabels,
 } from "./components/LearningProgress";
+import ArtifactView from "./components/ArtifactView";
 import { RichText } from "./components/RichText";
 import {
   FlashcardPanel,
@@ -66,9 +67,11 @@ import {
 import { CredentialsError, getCredentials, saveCredentials } from "./lib/credentials";
 import { createBackup, parseBackup, mergeBackup, normalizeDeletedNoteIds, resolveSettingsUpdatedAt, type BackupImportResult } from "./lib/backup";
 import {
+  knowledgeGraphReviewItems,
   rateReviewItem,
   sessionReviewItems,
   misconceptionToReviewItem,
+  type ReviewIdOptions,
 } from "./lib/review";
 import { createDiagnosticProfile, submitDiagnostic } from "./lib/diagnostic";
 import { computePathProgress, describePathProgress } from "./lib/learningPath";
@@ -99,6 +102,19 @@ import {
   type SyncStatus,
 } from "./components/AccountPanel";
 import { prepareBookStudy } from "./lib/bookStudy";
+import {
+  buildAttachmentReference,
+  checkAttachmentSize,
+  classifyAttachment,
+  clearAllAttachments,
+  extractPdfText,
+  imageInlineDataUrl,
+  MAX_ATTACHMENT_TEXT_CHARS,
+  readAttachmentBytes,
+  saveAttachmentBytes,
+  deleteAttachmentBytes,
+} from "./lib/attachments";
+import type { AttachmentImage, AttachmentMeta } from "./types";
 import { clearBookLibrary, getBook, setBookOwner } from "./lib/bookStorage";
 import { BookLibrary } from "./components/LazyBookLibrary";
 import type { BookDocument, BookSourceLocation, BookStudySelection } from "./bookTypes";
@@ -413,8 +429,87 @@ function safeExternalUrl(value: string | undefined): string | undefined {
  * 备份里的复习项与诊断是扁平列表，恢复时必须挂回所属会话；
  * 会话自身已有的条目一并保留（同一 ID 以备份列表为准）。
  */
+/** 图谱复习的备份归属：仅作持久化容器，不是可打开的学习会话。 */
+const GRAPH_REVIEW_HOLDER_PREFIX = "__zhixu-knowledge-graph-reviews__:";
+
+function workspaceReviewItems(sessions: StudySession[]): ReviewItem[] {
+  return sessions.flatMap((session) => session.reviews ?? []);
+}
+
+/** 所有面向用户的会话入口都排除内部持有器及其承接的图谱练习。 */
+function visibleSessions(sessions: StudySession[]): StudySession[] {
+  return sessions
+    .filter((session) => !session.id.startsWith(GRAPH_REVIEW_HOLDER_PREFIX))
+    .map((session) => ({
+      ...session,
+      reviews: (session.reviews ?? []).filter(
+        (item) => item.sessionId === session.id,
+      ),
+    }));
+}
+
+/**
+ * 把全局复习项写回所属会话。图谱练习的源会话可以已删除；此时使用内部
+ * 持有器保留题干、评分与调度，顶层复习集合仍能按原有备份契约恢复。
+ */
+export function applyReviewsToSessions(
+  sessions: StudySession[],
+  reviews: ReviewItem[],
+  now: number,
+): StudySession[] {
+  const present = new Set(sessions.map((session) => session.id));
+  const bySession = new Map<string, ReviewItem[]>();
+  for (const item of reviews) {
+    const sessionId = present.has(item.sessionId)
+      ? item.sessionId
+      : `${GRAPH_REVIEW_HOLDER_PREFIX}${item.sessionId}`;
+    const list = bySession.get(sessionId);
+    if (list) list.push(item);
+    else bySession.set(sessionId, [item]);
+  }
+  const result = sessions.map((session) => ({
+    ...session,
+    reviews: bySession.get(session.id) ?? [],
+    updatedAt: session.id.startsWith(GRAPH_REVIEW_HOLDER_PREFIX)
+      ? Math.max(session.updatedAt, now)
+      : session.updatedAt,
+  }));
+  for (const [sessionId, items] of bySession) {
+    if (present.has(sessionId)) continue;
+    const createdAt = Math.min(...items.map((item) => item.createdAt));
+    result.push({
+      ...createSession("知识图谱复习", "从零开始"),
+      id: sessionId,
+      topic: "知识图谱复习",
+      goal: "保留知识图谱的主动回忆练习",
+      reviews: items,
+      createdAt,
+      updatedAt: Math.max(createdAt, now),
+    });
+  }
+  return result;
+}
+
+/** 全局入口与刷新共用：最多新增五条，已有题目和评分进度保持不变。 */
+export function addKnowledgeGraphReviews(
+  graph: KnowledgeGraph,
+  sessions: StudySession[],
+  options: ReviewIdOptions,
+): StudySession[] {
+  const existing = workspaceReviewItems(sessions);
+  const generated = knowledgeGraphReviewItems(
+    graph,
+    { ...options, limit: 5 },
+    existing,
+  );
+  return generated.length
+    ? applyReviewsToSessions(sessions, [...existing, ...generated], options.now)
+    : sessions;
+}
+
 function attachSessionExtras(
   source: Pick<StudyBackup, "sessions" | "reviews" | "diagnostics">,
+  now = localNow(),
 ): StudySession[] {
   const reviewsBySession = new Map<string, ReviewItem[]>();
   for (const item of source.reviews) {
@@ -425,7 +520,7 @@ function attachSessionExtras(
   const diagnosticsById = new Map<string, DiagnosticProfile>(
     source.diagnostics.map((profile) => [profile.id, profile] as const),
   );
-  return source.sessions.map((session) => {
+  const attached = source.sessions.map((session) => {
     const mergedReviews = new Map<string, ReviewItem>();
     for (const item of session.reviews ?? []) mergedReviews.set(item.id, item);
     for (const item of reviewsBySession.get(session.id) ?? []) {
@@ -442,6 +537,7 @@ function attachSessionExtras(
         : session.diagnostic,
     };
   });
+  return applyReviewsToSessions(attached, workspaceReviewItems(attached), now);
 }
 
 /**
@@ -792,7 +888,7 @@ function AccountSwitchRecoveryDialog({
 
 export default function App() {
   const {
-    sessions,
+    sessions: storedSessions,
     setSessions,
     graph,
     setGraph,
@@ -803,6 +899,7 @@ export default function App() {
     recordActivity,
     storageError,
   } = useStudyStorage();
+  const sessions = useMemo(() => visibleSessions(storedSessions), [storedSessions]);
   const [view, setView] = useState<View>("home");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tab, setTab] = useState<StudyTab>("lesson");
@@ -952,8 +1049,8 @@ export default function App() {
     [],
   );
   // 引用最新状态，让同步与回调不依赖 effect 闭包的过期快照。
-  const sessionsRef = useRef(sessions);
-  sessionsRef.current = sessions;
+  const sessionsRef = useRef(storedSessions);
+  sessionsRef.current = storedSessions;
   const notesRef = useRef(notes);
   notesRef.current = notes;
   const activityRef = useRef(activity);
@@ -1500,7 +1597,10 @@ export default function App() {
       cancelPending();
       setCloudWorkspace(null);
       setSyncStatus({ state: "offline" });
-      if (options.wipeLocal) clearLocalStudyData();
+      if (options.wipeLocal) {
+        clearLocalStudyData();
+        void clearAllAttachments();
+      }
       if (options.notify) notifyRef.current(options.reason ?? "已退出登录。");
     },
     [clearLocalStudyData, dispatchAccountSwitch],
@@ -1671,6 +1771,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    if (view !== "review") return;
+    const frame = requestAnimationFrame(refreshGlobalReviews);
+    return () => cancelAnimationFrame(frame);
+  }, [view, graph]);
   useEffect(() => {
     if (!active?.quizSubmitted && !active?.learningState?.misconceptions.length) return;
     const frame = requestAnimationFrame(() => ensureReviews(active));
@@ -1991,22 +2096,81 @@ export default function App() {
       setError({ sessionId: errorSessionId, text: "书籍陪读的原文范围由书架选择。请回到原书选择章节或段落，不把额外文件混入本书引用。" });
       return;
     }
-    if (!/\.(txt|md|markdown)$/i.test(file.name)) {
+    const classified = classifyAttachment(file);
+    if ("error" in classified) {
+      if (!/\.(txt|md|markdown)$/i.test(file.name)) {
+        setError({ sessionId: errorSessionId, text: classified.error });
+        return;
+      }
+      // TXT / Markdown 走原有文本资料路径。
+      await uploadTextReference(file, studySession, errorSessionId);
+      return;
+    }
+    // 图片 / PDF 附件：二进制入 IndexedDB（按会话隔离），元数据随 Reference 走。
+    const sizeError = checkAttachmentSize(classified.kind, file.size);
+    if (sizeError) {
+      setError({ sessionId: errorSessionId, text: sizeError });
+      return;
+    }
+    const attachmentId = uid();
+    const meta: AttachmentMeta = {
+      id: attachmentId,
+      name: file.name,
+      kind: classified.kind,
+      mimeType: classified.mimeType,
+      byteLength: file.size,
+    };
+    try {
+      // 会话尚未建立时先创建占位会话，附件才能有稳定的 sessionId 键。
+      let targetSession = studySession;
+      if (!targetSession) {
+        targetSession = createSession(
+          file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "附件学习",
+          level,
+          [],
+        );
+        setSessions((previous) => [targetSession!, ...previous]);
+        setActiveId(targetSession.id);
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let text = "";
+      if (meta.kind === "pdf") {
+        text = await extractPdfText(file);
+        if (text.length > MAX_ATTACHMENT_TEXT_CHARS)
+          throw new Error("PDF 文本层超过 60,000 字符，请拆分后分次上传。");
+      }
+      await saveAttachmentBytes(targetSession.id, meta, bytes);
+      const reference = buildAttachmentReference(meta, text);
+      updateSession(targetSession.id, {
+        references: [...targetSession.references, reference],
+      });
+      notify(
+        meta.kind === "image"
+          ? "图片已添加；下一次 AI 对话会结合图片讲解"
+          : "PDF 文本层已添加；下一次 AI 对话会结合资料讲解",
+      );
+      setError(null);
+    } catch (e) {
       setError({
         sessionId: errorSessionId,
-        text: "目前支持 .txt 和 Markdown 文本资料。请先将其他格式转换为文本。",
+        text: e instanceof Error ? e.message : "读取附件失败，请重试。",
       });
-      return;
     }
-    if (file.size > 120_000) {
-      setError({ sessionId: errorSessionId, text: "单份资料请控制在 120 KB 内，避免超过模型上下文限制。" });
-      return;
-    }
+  }
+
+  async function uploadTextReference(
+    file: File,
+    studySession: StudySession | undefined,
+    errorSessionId: string | null,
+  ): Promise<void> {
     try {
       const text = await file.text();
       if (!text.trim()) throw new Error("资料中没有可读取的文本。");
       if (text.includes("\u0000"))
         throw new Error("这份文件不是纯文本，请转换为 UTF-8 文本后再上传。");
+      if (file.size > 120_000) {
+        throw new Error("单份资料请控制在 120 KB 内，避免超过模型上下文限制。");
+      }
       if (
         [
           ...(studySession ? studySession.references : references),
@@ -2217,6 +2381,17 @@ export default function App() {
           return { ...reference, text: block.text };
         });
       }
+      // 附件图片：只有 ≤2MB 的图片才内联 base64 直传；PDF 已作为文本 reference，
+      // >2MB 图片只随元数据出现，服务端明确告知模型"未收到图像本体"。
+      const attachmentImages: AttachmentImage[] = [];
+      for (const reference of suppliedReferences) {
+        const meta = reference.attachment;
+        if (!meta || meta.kind !== "image") continue;
+        const bytes = await readAttachmentBytes(session.id, meta.id);
+        if (!bytes) continue;
+        const dataUrl = imageInlineDataUrl(bytes, meta.mimeType);
+        if (dataUrl) attachmentImages.push({ id: meta.id, dataUrl });
+      }
       const requestCourse = session.courseId
         ? getCourse(session.courseId)
         : undefined;
@@ -2265,6 +2440,9 @@ export default function App() {
           ? { knowledgeGraph: graphRef.current }
           : {}),
         references: suppliedReferences,
+        // 附件图片（≤2MB）转 base64 直传给视觉模型；>2MB 的图片只有元数据，
+        // 服务端会明确说明"仅收到描述"，不会假装看见了图片。
+        ...(attachmentImages.length ? { attachmentImages } : {}),
         ...(webSearchOn && !session.bookContext ? { webSearch: true } : {}),
         ...(session.bookContext ? { bookContext: session.bookContext } : {}),
         ...((chosen.apiKey || chosen.searchApiKey) ? { settings: chosen } : {}),
@@ -2329,6 +2507,7 @@ export default function App() {
             timestamp: localNow(),
             ...(result.teaching ? { teaching: result.teaching } : {}),
             ...(result.quality ? { quality: result.quality } : {}),
+            ...(result.artifact ? { artifact: result.artifact } : {}),
           },
         ],
         ...(result.title && !previous.courseId ? { title: result.title } : {}),
@@ -2486,7 +2665,9 @@ export default function App() {
 
   /** 由当前会话的真实错题与已有修复讲解生成复习项，写回同一 session.reviews。 */
   function buildSessionReviews(session: StudySession): ReviewItem[] {
-    const existing = session.reviews ?? [];
+    const existing = (session.reviews ?? []).filter(
+      (item) => item.sessionId === session.id,
+    );
     const now = localNow();
     const generated = sessionReviewItems(session, {
       now,
@@ -2546,15 +2727,33 @@ export default function App() {
     });
   }
 
-  function handleRateReview(item: ReviewItem, rating: ReviewRating) {
-    // 评分只写回产生它的那个会话；again 后仍可再练，绝不自动标记掌握。
+  function refreshGlobalReviews() {
     const now = localNow();
-    const rated = rateReviewItem(item, rating, now);
-    updateSession(item.sessionId, (previous) => ({
-      reviews: (previous.reviews ?? []).map((existing) =>
-        existing.id === rated.id ? { ...rated, updatedAt: now } : existing,
-      ),
-    }));
+    setSessions((previous) => {
+      let next = previous;
+      for (const session of visibleSessions(previous)) {
+        const reviews = buildSessionReviews(session);
+        const unchanged = reviews.length === (session.reviews ?? []).length && reviews.every((item, index) => item === session.reviews?.[index]);
+        if (!unchanged) {
+          const present = new Set(next.map((item) => item.id));
+          next = next.map((item) => item.id === session.id && present.has(item.id)
+            ? { ...item, reviews, updatedAt: Math.max(now, item.updatedAt + 1) }
+            : item);
+        }
+      }
+      return addKnowledgeGraphReviews(graphRef.current, next, { now, newId: uid });
+    });
+  }
+
+  function handleRateReview(item: ReviewItem, rating: ReviewRating) {
+    // 图谱复习即使源会话已删除也保留在独立持有器中；again 后仍可再练。
+    const now = localNow();
+    const rated = { ...rateReviewItem(item, rating, now), updatedAt: now };
+    setSessions((previous) => applyReviewsToSessions(
+      previous,
+      workspaceReviewItems(previous).map((existing) => existing.id === rated.id ? rated : existing),
+      now,
+    ));
     recordActivity();
   }
 
@@ -3063,7 +3262,13 @@ export default function App() {
           const href = safeExternalUrl(r.url);
           return (
             <span className="reference-chip" key={`${r.name}-${i}`}>
-              {r.url ? <Globe size={14} /> : <FileText size={14} />}
+              {r.attachment ? (
+                <AttachmentThumb reference={r} />
+              ) : r.url ? (
+                <Globe size={14} />
+              ) : (
+                <FileText size={14} />
+              )}
               <span title={r.url ? `${r.name}\n${r.url}` : r.name}>{r.name}</span>
               {r.location ? (
                 <button type="button" aria-label={`回看原文 ${r.name}`} onClick={() => openBookSource(r.location!)}><BookOpen size={13} /></button>
@@ -3089,6 +3294,33 @@ export default function App() {
     );
   }
 
+  /**
+   * 附件缩略图：图片从本机 IndexedDB 读取字节并转 blob URL（断网仍可见），
+   * PDF 用文档图标占位。离开组件时回收 blob URL。
+   */
+  function AttachmentThumb({ reference }: { reference: Reference }) {
+    const meta = reference.attachment!;
+    const [url, setUrl] = useState<string | null>(null);
+    const sessionId = active?.id;
+    useEffect(() => {
+      if (meta.kind !== "image" || !sessionId) return;
+      let objectUrl: string | null = null;
+      let cancelled = false;
+      void readAttachmentBytes(sessionId, meta.id).then(bytes => {
+        if (cancelled || !bytes) return;
+        objectUrl = URL.createObjectURL(new Blob([bytes], { type: meta.mimeType }));
+        setUrl(objectUrl);
+      });
+      return () => {
+        cancelled = true;
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
+    }, [meta.id, meta.kind, meta.mimeType, sessionId]);
+    if (meta.kind === "image" && url) {
+      return <img className="reference-thumb" src={url} alt="" style={{ width: 22, height: 22, borderRadius: 3, objectFit: "cover", flexShrink: 0 }} />;
+    }
+    return <FileText size={14} />;
+  }
 
   // 公共模式：必须登录后才能使用可调用 AI 的主应用。
   const authGate = config.authRequired;
@@ -3560,7 +3792,7 @@ export default function App() {
                         <button
                           className="icon-button attach-button"
                           type="button"
-                          title="添加 TXT / Markdown 学习资料"
+                          title="添加 TXT / Markdown / 图片（PNG/JPEG/WebP ≤10MB）/ PDF（≤30MB，需含文本层）"
                           aria-label="添加学习资料"
                           onClick={() => fileRef.current?.click()}
                         >
@@ -4200,6 +4432,9 @@ export default function App() {
                                     onOpenSource={openBookSource}
                                   />
                                 )}
+                                {message.role === "assistant" && message.artifact && (
+                                  <ArtifactView artifact={message.artifact} />
+                                )}
                               </>
                               {canRetry && (
                                 <div className="failed-message-actions">
@@ -4466,7 +4701,7 @@ export default function App() {
                           type="button"
                           className="icon-button"
                           aria-label="添加学习资料"
-                          title="添加 TXT / Markdown 资料"
+                          title="添加 TXT / Markdown / 图片 / PDF 资料"
                           onClick={() => fileRef.current?.click()}
                         >
                           <Paperclip size={18} />
@@ -4509,13 +4744,19 @@ export default function App() {
                     </form>
                     <ReferencesList
                       items={active.references}
-                      onRemove={(index) =>
+                      onRemove={(index) => {
+                        const removed = active.references[index];
+                        if (removed?.attachment) {
+                          void deleteAttachmentBytes(active.id, removed.attachment.id).catch(() => {
+                            /* 删除失败不阻塞移除；字节留在 IndexedDB 中无害。 */
+                          });
+                        }
                         changeActive({
                           references: active.references.filter(
                             (_, i) => i !== index,
                           ),
-                        })
-                      }
+                        });
+                      }}
                     />
                     <div className="study-composer-note">
                       <ShieldCheck size={12} />
@@ -4890,9 +5131,7 @@ export default function App() {
                   openSession(target);
                 }}
                 onExplain={explainReviewItemCard}
-                onRefreshReviews={() => {
-                  for (const session of sessions) ensureReviews(session);
-                }}
+                onRefreshReviews={refreshGlobalReviews}
               />
               {sessions.length ? (
                 <div className="review-grid">
@@ -4981,10 +5220,10 @@ export default function App() {
         ref={fileRef}
         className="sr-only"
         type="file"
-        accept=".txt,.md,.markdown,text/plain,text/markdown"
+        accept=".txt,.md,.markdown,.png,.jpg,.jpeg,.webp,.pdf,image/png,image/jpeg,image/webp,application/pdf"
         onChange={uploadReference}
         tabIndex={-1}
-        aria-label="上传学习资料"
+        aria-label="上传学习资料（文本、图片或 PDF）"
       />
       <input
         ref={backupInputRef}
@@ -5541,7 +5780,7 @@ function WorkspacePanels({ session, course, workspaceView, busy, transferBusy, t
   return session.learningState ? <LearningReport state={session.learningState} reviews={reviews} diagnostic={diagnostic} busy={busy} onOpenReviews={() => onSetWorkspaceView("review")} onResumeQuestion={onFocusChatInput} onJumpToStep={onEnterStep} /> : <div className="empty-state"><FileText size={32} /><h2>还没有 AI 理解证据报告</h2><p>{course ? `已完成 ${session.completedStages.length}/${course.stages.length} 个课程理解检查；这些记录不等于推理或迁移证据。` : "先开始真实学习并作答，报告会区分辨认、推理与迁移。"} {reviews.length ? `当前有 ${reviews.length} 条真实错题或误区复习记录。` : "还没有复习项。"}</p></div>;
 }
 
-/** 全局复习页：跨会话汇总真实复习项；题目原文从各自会话的 quiz 取。 */
+/** 全局复习页：跨会话汇总真实复习项，包括源会话已删除的图谱练习。 */
 function GlobalReviewWorkspace({
   sessions,
   busy,
@@ -5580,7 +5819,7 @@ function GlobalReviewWorkspace({
         disabled={busy}
         onClick={onRefreshReviews}
       >
-        从各学习记录的真实错题重新整理复习项
+        从真实错题、误区和知识图谱补充复习项（最多新增 5 条图谱练习）
       </button>
     </>
   );

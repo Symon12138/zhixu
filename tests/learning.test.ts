@@ -197,14 +197,35 @@ test("分红的局部错误保留为误区，解释后答对原理仍需另一�
   assert.equal(repaired.misconceptions[0].evidenceQuote, wrong);
   assert.equal(repaired.misconceptions[0].status, "repairing");
   const explanation =
-    "现金从产品已有资产转出，单位净值应扣除分红，累计值加回这笔历史现金。";
-  const understood = commit(
+    "现金从产品已有资产转出：产品资产池价值随分红等额减少，而客户现金账户等额增加。";
+  const derivationAsked = commit(
     requestFor(repaired, explanation),
     draftFor(repaired, {
       intent: "answer",
-      assessment: answerFor(repaired, explanation),
+      assessment: answerFor(repaired, explanation, "correct", "reasoning"),
+      question: {
+        stepId: repaired.currentStepId,
+        prompt: "请从资金流前提出发，推导现金分红对两种净值的影响，并给一个边界反例。",
+        kind: "derivation",
+        options: [],
+        successCriteria: ["至少两个前提", "结论", "边界或反例"],
+      },
+    }),
+  );
+  assert.equal(derivationAsked.steps[0].mastery, "learning");
+  const derivationAnswer =
+    "前提一：分红现金来自产品资产池；前提二：资产池价值随分红等额减少而现金账户等额增加。结论：单位净值按分红下调，累计净值把历史现金加回。边界：若期间还有其它价格变动，这个关系不单独成立。";
+  const understood = commit(
+    requestFor(derivationAsked, derivationAnswer),
+    draftFor(derivationAsked, {
+      intent: "answer",
+      assessment: answerFor(derivationAsked, derivationAnswer, "correct", "derivation"),
+      chain: {
+        premises: ["分红现金来自产品资产池", "资产池价值随分红等额减少"],
+        conclusion: "分红是资产形式转换：单位净值下调，累计净值加回历史现金",
+      },
       question: questionFor(
-        repaired,
+        derivationAsked,
         "transfer",
         "另一产品分红前两种净值均1.40，每份发0.10且无其它变化，分红后分别是多少？为什么？",
       ),

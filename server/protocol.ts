@@ -32,6 +32,7 @@ const decisionIssueCodes: Record<string, true> = {
   tool_is_not_evidence: true, unknown_focus: true, unknown_destination: true, navigation_focus_mismatch: true, silent_topic_jump: true,
   invalid_assumption_retraction: true, invented_misconception: true, tool_changed_progress: true,
   missing_misconception: true, numeric_mismatch: true, side_question_required: true, review_answer_revealed: true, review_new_answer_revealed: true,
+  incomplete_derivation: true, derivation_chain_not_grounded: true,
   requested_solution_not_evidence: true,
 };
 
@@ -231,6 +232,7 @@ function composeDecision(request: ChatRequest, content: LessonContent, raw: unkn
     teaching: {
       intent, move, focusStepId, assessment, navigation,
       question: content.question ? { ...content.question, stepId: focusStepId } : null,
+      ...(decision.chain === undefined ? {} : { chain: decision.chain }),
       assumptions: content.assumptions,
       retractedAssumptions: decision.retractedAssumptions ?? [],
       resolvedMisconceptionIds: decision.resolvedMisconceptionIds ?? [],

@@ -493,6 +493,14 @@
   color: #8ba077;
 }
 
+.kg-related-rule {
+  display: block;
+  margin: 4px 0 0;
+  color: #7a8a6e;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 /* 空态 */
 .kg-page .kg-empty {
   margin-top: 36px;

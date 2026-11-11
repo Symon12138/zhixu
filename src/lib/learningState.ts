@@ -25,6 +25,11 @@ export class LearningProtocolError extends Error {
   }
 }
 
+export interface DerivationChain {
+  premises: string[];
+  conclusion: string;
+}
+
 export interface QuestionContent {
   prompt: string;
   kind: QuestionKind;
@@ -41,8 +46,8 @@ export const moves: TeachingMove[] = [
   "orient", "explain", "probe", "hint", "repair", "clarify", "answer", "return", "transfer", "recap",
 ];
 const verdicts: AssessmentVerdict[] = ["not_assessed", "uncertain", "incorrect", "partial", "correct"];
-const evidenceKinds: ("none" | EvidenceKind)[] = ["none", "recognition", "reasoning", "transfer"];
-const questionKinds: QuestionKind[] = ["orientation", "diagnostic", "reasoning", "calculation", "transfer", "choice"];
+const evidenceKinds: ("none" | EvidenceKind)[] = ["none", "recognition", "reasoning", "derivation", "transfer"];
+const questionKinds: QuestionKind[] = ["orientation", "diagnostic", "reasoning", "derivation", "calculation", "transfer", "choice"];
 const masteryLevels: MasteryLevel[] = ["new", "learning", "understood", "applied"];
 
 function invalid(detail: string, code = "invalid_protocol"): never {
@@ -97,7 +102,21 @@ export function parseQuestionContent(value: unknown): QuestionContent {
     ...(data.protectedAnswers === undefined ? {} : { protectedAnswers: strings(data.protectedAnswers, "question.protectedAnswers", 8, 0, 200) }),
   };
   if (result.kind === "choice" && result.options.length < 2) invalid("选择题至少需要两个选项");
+  if (result.kind === "derivation" && !result.successCriteria.some(item => /(?:前提|条件)/.test(item) && /(?:至少|两|二|2)/.test(item)))
+    invalid("推导题的判定标准必须要求至少两个前提");
+  if (result.kind === "derivation" && !result.successCriteria.some(item => /结论/.test(item)))
+    invalid("推导题的判定标准必须检查学习者给出的结论");
+  if (result.kind === "derivation" && !result.successCriteria.some(item => /边界|反例/.test(item)))
+    invalid("推导题的判定标准必须检查边界或反例");
   return result;
+}
+
+export function parseDerivationChain(value: unknown): DerivationChain {
+  const data = object(value, "assessment.chain");
+  return {
+    premises: strings(data.premises, "assessment.chain.premises", 8, 2, 1000),
+    conclusion: text(data.conclusion, "assessment.chain.conclusion", 1000),
+  };
 }
 
 export function questionDraft(value: unknown): QuestionDraft {
@@ -121,15 +140,33 @@ function evidence(value: unknown): LearningEvidence {
     quote: text(data.quote, "evidence.quote", 1000),
     questionId: text(data.questionId, "evidence.questionId", 150),
     ...(data.question === undefined ? {} : { question: text(data.question, "evidence.question", 2500) }),
-    kind: choice(data.kind, ["recognition", "reasoning", "transfer"] as const, "evidence.kind"),
+    kind: choice(data.kind, ["recognition", "reasoning", "derivation", "transfer"] as const, "evidence.kind"),
+    ...(data.chain === undefined ? {} : (() => {
+      const chain = object(data.chain, "evidence.chain");
+      return { chain: {
+        premises: strings(chain.premises, "evidence.chain.premises", 8, 2, 1000),
+        conclusion: text(chain.conclusion, "evidence.chain.conclusion", 1000),
+      } };
+    })()),
     turn: data.turn as number,
   };
 }
 
 function normalizedQuestion(value: string | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = value.normalize("NFKC").replace(/\s+/g, "");
+  const normalized = value.normalize("NFKC").toLowerCase()
+    .replace(/(?:为什么|为何|怎么|怎样|如何)/g, "问")
+    .replace(/(?:哪里|哪儿|何处)/g, "哪处")
+    .replace(/\d+(?:\.\d+)?/g, "#")
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
   return normalized === "" ? undefined : normalized;
+}
+
+/** 两个真实题干都可比较，才允许把换 ID 以外的差异算作独立问题。 */
+function isIndependentQuestion(item: LearningEvidence, questionId: string, prompt?: string): boolean {
+  const target = normalizedQuestion(prompt);
+  const prior = normalizedQuestion(item.question);
+  return item.questionId !== questionId && target !== undefined && prior !== undefined && prior !== target;
 }
 
 /**
@@ -139,21 +176,25 @@ function normalizedQuestion(value: string | undefined): string | undefined {
  * 由调用方拒绝 applied，而不是修改或补造证据。
  */
 export function hasPriorReasoning(items: LearningEvidence[], questionId: string, prompt?: string): boolean {
-  const target = normalizedQuestion(prompt);
-  if (target === undefined) return false;
-  return items.some(item => {
-    const prior = normalizedQuestion(item.question);
-    return item.kind === "reasoning" && item.questionId !== questionId &&
-      prior !== undefined && prior !== target;
-  });
+  return items.some(item => (item.kind === "reasoning" || item.kind === "derivation") && isIndependentQuestion(item, questionId, prompt));
+}
+
+export function hasDerivationChain(items: LearningEvidence[]): boolean {
+  return items.some(item => item.kind === "derivation" && item.chain !== undefined);
+}
+
+export function hasIndependentReasoning(items: LearningEvidence[]): boolean {
+  return items.some(item => item.kind === "reasoning" &&
+    items.some(other => other !== item && other.kind === "reasoning" &&
+      isIndependentQuestion(other, item.questionId, item.question)));
 }
 
 function masteryEvidence(value: unknown, name: string): { mastery: MasteryLevel; evidence: LearningEvidence[] } {
   const data = object(value, name);
   const mastery = choice(data.mastery, masteryLevels, `${name}.mastery`);
   const items = list(data.evidence, `${name}.evidence`, 200).map(evidence);
-  if ((mastery === "understood" || mastery === "applied") && !items.some(item => item.kind === "reasoning"))
-    invalid("理解状态必须有学习者解释的证据", "unproven_mastery");
+  if ((mastery === "understood" || mastery === "applied") && !hasDerivationChain(items) && !hasIndependentReasoning(items))
+    invalid("理解状态必须有完整推导链，或两条不同问题上的独立解释证据", "unproven_mastery");
   if (mastery === "applied" && !items.some(item => item.kind === "transfer" && hasPriorReasoning(items, item.questionId, item.question)))
     invalid("迁移通过必须有不同问题上的解释和迁移证据", "unproven_mastery");
   return { mastery, evidence: items };

@@ -198,6 +198,44 @@ test("依赖图按拓扑分层，忽略重复边与缺失节点", () => {
   assert.match(html, /链式法则用于复合函数求导/);
 });
 
+test("依赖边的 kind 与 rule 透传布局并在详情面板展示推理规则", () => {
+  // locale 排序下“极限”组排首位，LIMIT 成为 SSR 默认选中节点。
+  const NUMBER: KnowledgeProposition = {
+    id: "kp_number",
+    statement: "实数与数列收敛是极限语言的基础",
+    topic: "实数",
+    sourceSessionId: "session-calculus",
+    verifiedAt: VERIFIED_AT - 1000,
+    strength: "understood",
+    evidence: [],
+  };
+  const graph: KnowledgeGraph = {
+    propositions: [LIMIT, DERIVATIVE, NUMBER],
+    dependencies: [
+      {
+        fromId: "kp_number",
+        toId: "kp_limit",
+        createdAt: VERIFIED_AT,
+        kind: "derivation",
+        rule: "瞬时变化率由割线斜率取极限得到，极限是它的前提",
+      },
+      {
+        fromId: "kp_limit",
+        toId: "kp_derivative",
+        createdAt: VERIFIED_AT,
+      },
+    ],
+  };
+  const layout = view.computeKnowledgeGraphLayout(graph);
+  const derivationEdge = layout.edges.find((edge) => edge.fromId === "kp_number");
+  assert.equal(derivationEdge?.kind, "derivation");
+  assert.equal(derivationEdge?.rule, "瞬时变化率由割线斜率取极限得到，极限是它的前提");
+
+  // 默认选中“极限”组首节点（LIMIT）时，前置区展示推理规则。
+  const html = render({ graph, sessions: SESSIONS, onOpenSession: () => undefined });
+  assert.match(html, /推导：瞬时变化率由割线斜率取极限得到，极限是它的前提/);
+});
+
 test("节点详情展示真实证据，并列出前置与后续", () => {
   const single: KnowledgeGraph = {
     propositions: [DERIVATIVE],
@@ -291,7 +329,7 @@ test("App 注册知识图谱入口、标题与路由，并从本地工作区读�
   const source = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 
   assert.match(source, /type View = "home" \| "study" \| "notes" \| "review" \| "graph" \| "books"/);
-  assert.match(source, /const \{\s*sessions,\s*setSessions,\s*graph,/);
+  assert.match(source, /const \{\s*sessions: storedSessions,\s*setSessions,\s*graph,/);
   assert.match(source, /<span>知识图谱<\/span>/);
   assert.match(source, /view === "graph"/);
   assert.match(source, /<KnowledgeGraphView/);

@@ -140,14 +140,15 @@ test("不完整或自相矛盾的评审不发布，内容拒绝与评审格式�
 });
 
 test("评审不能偷换讲解或问题身份，证据必须绑定当前真实原话", () => {
-  const state = stateWithQuestion();
+  const state = stateWithQuestion(true);
   const text = "单位净值1.05，累计净值仍1.10，因为现金从产品资产中转出且累计值计入已分红。";
   const request = requestFor(state, text);
   const decision = { intent: "answer", move: "explain", assessment: { verdict: "correct", demonstrated: "reasoning", feedback: "已将产品资产的变化与累计口径分开。" } };
   const result = commit(request, lesson(), decision);
+  // mastered 初始状态已带推导链证据；新一轮正确推理保持 understood。
   assert.equal(result.learningState!.steps[0].mastery, "understood");
-  assert.equal(result.learningState!.steps[0].evidence[0].questionId, state.pendingQuestion!.id);
-  assert.equal(result.learningState!.steps[0].evidence[0].quote, text);
+  assert.equal(result.learningState!.steps[0].evidence.at(-1)!.questionId, state.pendingQuestion!.id);
+  assert.equal(result.learningState!.steps[0].evidence.at(-1)!.quote, text);
   for (const bad of [
     { ...decision, focusStepId: "step-2" },
     { ...decision, assessment: { ...decision.assessment, questionId: "another-question" } },

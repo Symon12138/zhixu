@@ -1,15 +1,36 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import type { ChatRequest, LearningState } from "../src/types";
+import { fileURLToPath } from "node:url";
+import type {
+  ChatRequest,
+  ChatResponse,
+  LearningState,
+  TeachingReceipt,
+} from "../src/types";
+import { propositionId } from "../src/lib/knowledgeGraph";
 import {
+  buildBookFixture,
   buildSeedState,
+  evaluateOutcomeCase,
   evaluateTurnChecks,
+  EVAL_CHECKS,
+  loadOutcomeSuite,
   loadSuite,
+  missingCoverage,
   REQUIRED_COVERAGE,
+  scoreOutcomeTest,
+  summarizeAttempts,
+  summarizeOutcome,
   summarizeRun,
+  wilsonInterval,
   type CaseReport,
   type EvalCase,
   type EvalCheckResult,
+  type OutcomeCase,
   type TurnObservation,
 } from "../scripts/eval-teaching";
 import {
@@ -22,6 +43,21 @@ import {
  * 教学发布门禁的自测：全部使用受控模型响应，经真实 server/tutor 编排（草稿 → 独立评审 →
  * 提交状态），再交给 eval-teaching 的纯检查函数。不创建 model invoker，也不发网络请求。
  */
+
+const REPO_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const TSX_CLI = path.join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+const EVAL_SCRIPT = path.join(REPO_ROOT, "scripts", "eval-teaching.ts");
+
+function runEvalCli(args: string[], overrides: NodeJS.ProcessEnv = {}) {
+  const env = { ...process.env, ...overrides };
+  delete env.NODE_OPTIONS;
+  return spawnSync(process.execPath, [TSX_CLI, EVAL_SCRIPT, ...args], {
+    cwd: REPO_ROOT,
+    env,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+}
 
 const suite = loadSuite();
 const defaults = suite.defaults;
@@ -455,6 +491,11 @@ test("同题换编号冒充迁移被编排拒绝，伪造迁移状态被断言�
   assert.equal(forgedCheck.passed, false);
 
   const applied = structuredClone(forged);
+  // 去掉新增的独立推理证据，只保留与伪造迁移同题的旧证据：
+  // 同题重答不能单独满足 applied 的结构校验。
+  applied.steps[0].evidence = applied.steps[0].evidence.filter(
+    (entry) => entry.questionId !== "q-reason-2",
+  );
   applied.steps[0].mastery = "applied";
   const appliedChecks = evaluateTurnChecks(
     ["no_forged_transfer"],
@@ -533,4 +574,403 @@ test("选择题只能留下辨认证据，冒充推理会被拒绝", async () =>
   );
   assert.deepEqual(failedChecks(checks), []);
   assert.equal(accepted.learningState?.steps[0].mastery, "learning");
+});
+
+function receiptWithSources(sources: TeachingReceipt["sources"]): TeachingReceipt {
+  return {
+    intent: "continue",
+    move: "explain",
+    focusTitle: "复利",
+    assessment: {
+      verdict: "not_assessed",
+      evidenceQuote: "",
+      questionId: null,
+      demonstrated: "none",
+      feedback: "仅讲解，不认证掌握。",
+    },
+    navigation: { kind: "stay" },
+    assumptions: [],
+    sources,
+  };
+}
+
+test("新增夹具字段与程序断言可被套件解析", () => {
+  for (const id of [
+    "known_proposition_used",
+    "graph_dependency_returned",
+    "graph_review_generated",
+    "book_quote_bound",
+    "web_claim_matched",
+  ] as const) {
+    assert.ok(EVAL_CHECKS.includes(id), `缺少检查 ${id}`);
+  }
+  const graphCase = caseById("graph-known-continuity");
+  assert.equal(graphCase.knowledgeGraph?.propositions[0]?.strength, "applied");
+  const bookCase = caseById("book-source-binding");
+  assert.ok(bookCase.bookFixture);
+  const material = buildBookFixture(bookCase.bookFixture);
+  assert.deepEqual(material.bookContext.suppliedBlockIds, ["b1", "b2"]);
+  assert.equal(material.references[1].location?.blockId, "b2");
+  assert.ok(material.references.every((reference) => reference.text.trim()));
+  const webCase = caseById("web-claim-binding");
+  assert.equal(webCase.webSearch, true);
+  assert.equal(webCase.references?.[0]?.verification, "claim_matched");
+  assert.ok(webCase.references?.[0]?.verifiedQuote);
+  assert.deepEqual(missingCoverage(suite), []);
+  const broad = loadSuite("eval/teaching-suite-broad.json");
+  assert.equal(broad.requiredCoverage, false);
+  assert.ok(missingCoverage(broad).length > 0, "泛化套件应显式豁免发布必需覆盖");
+});
+
+test("已掌握命题被忽略时 known_proposition_used 失败", () => {
+  const item = caseById("graph-known-continuity");
+  const request: ChatRequest = {
+    ...requestFor(item, "我已经会用复利公式，想理解连续复利。", "start"),
+    knowledgeGraph: item.knowledgeGraph,
+  };
+  const good = evaluateTurnChecks(
+    ["known_proposition_used"],
+    {
+      request,
+      response: {
+        message: "你已经掌握的前提是：复利是本金和已产生的利息一起计息。今天只补连续复利。",
+        plan: ["从复利到连续复利", "解释极限形式", "用新情境核对"],
+      },
+    },
+    { learnerText: "我已经会用复利公式，想理解连续复利。" },
+  ).find((check) => check.id === "known_proposition_used");
+  assert.ok(good);
+  assert.equal(good.passed, true, good.detail);
+
+  const ignored = evaluateTurnChecks(
+    ["known_proposition_used"],
+    {
+      request,
+      response: {
+        message: "我们从零开始学复利。",
+        plan: ["复利定义", "单利与复利对比", "练习"],
+      },
+    },
+    { learnerText: "我已经会用复利公式，想理解连续复利。" },
+  ).find((check) => check.id === "known_proposition_used");
+  assert.ok(ignored);
+  assert.equal(ignored.passed, false);
+  assert.match(ignored.detail, /没有体现/);
+});
+
+test("路线依赖必须回传且可追溯，缺图或悬空边失败", () => {
+  const item = caseById("graph-known-continuity");
+  const request = requestFor(item, "开始", "start");
+  const plan = ["复利是本金和利息一起计息", "连续复利是计息间隔趋近零的极限", "用极限表示连续增长"];
+  const graph = {
+    propositions: [],
+    dependencies: [
+      { fromId: propositionId(plan[0]), toId: propositionId(plan[1]), createdAt: 1 },
+    ],
+  };
+  const good = evaluateTurnChecks(
+    ["graph_dependency_returned"],
+    { request, response: { message: "先接上已有基础。", plan, knowledgeGraph: graph } },
+    { learnerText: "开始" },
+  ).find((check) => check.id === "graph_dependency_returned");
+  assert.ok(good);
+  assert.equal(good.passed, true, good.detail);
+
+  const missing = evaluateTurnChecks(
+    ["graph_dependency_returned"],
+    { request, response: { message: "先接上已有基础。", plan } },
+    { learnerText: "开始" },
+  ).find((check) => check.id === "graph_dependency_returned");
+  assert.ok(missing);
+  assert.equal(missing.passed, false);
+
+  const dangling = evaluateTurnChecks(
+    ["graph_dependency_returned"],
+    {
+      request,
+      response: {
+        message: "先接上已有基础。",
+        plan,
+        knowledgeGraph: {
+          propositions: [],
+          dependencies: [{ fromId: "kp_missing", toId: propositionId(plan[1]), createdAt: 1 }],
+        },
+      },
+    },
+    { learnerText: "开始" },
+  ).find((check) => check.id === "graph_dependency_returned");
+  assert.ok(dangling);
+  assert.equal(dangling.passed, false);
+  assert.match(dangling.detail, /路线和图谱之外/);
+});
+
+test("已理解命题能生成主动回忆复习项，无 understood 命题失败", () => {
+  const item = caseById("graph-review-ready");
+  const seed = seedOf(item);
+  const request = requestFor(item, "", "continue");
+  const generated = evaluateTurnChecks(
+    ["graph_review_generated"],
+    observationOf(request, "继续讲解复利。", seed),
+    { learnerText: "" },
+  ).find((check) => check.id === "graph_review_generated");
+  assert.ok(generated);
+  assert.equal(generated.passed, true, generated.detail);
+  assert.match(generated.detail, /kp_/);
+
+  const downgraded = structuredClone(seed);
+  downgraded.steps[0].mastery = "learning";
+  const none = evaluateTurnChecks(
+    ["graph_review_generated"],
+    observationOf(request, "继续讲解复利。", downgraded),
+    { learnerText: "" },
+  ).find((check) => check.id === "graph_review_generated");
+  assert.ok(none);
+  assert.equal(none.passed, false);
+  assert.match(none.detail, /understood/);
+});
+
+test("书籍引文必须逐字绑定本轮原文", () => {
+  const item = caseById("book-source-binding");
+  assert.ok(item.bookFixture);
+  const material = buildBookFixture(item.bookFixture);
+  const request: ChatRequest = {
+    ...requestFor(item, "请只根据这一章带我理解复利。", "start"),
+    bookContext: material.bookContext,
+    references: material.references,
+  };
+  const [first, second] = material.references;
+  const good = evaluateTurnChecks(
+    ["book_quote_bound"],
+    {
+      request,
+      response: {
+        message: "本章先给出分界。",
+        teaching: receiptWithSources([
+          { name: first.name, quote: first.text },
+          { name: second.name, quote: second.text, location: second.location },
+        ]),
+      },
+    },
+    { learnerText: "请只根据这一章带我理解复利。" },
+  ).find((check) => check.id === "book_quote_bound");
+  assert.ok(good);
+  assert.equal(good.passed, true, good.detail);
+
+  const fabricated = evaluateTurnChecks(
+    ["book_quote_bound"],
+    {
+      request,
+      response: {
+        message: "本章说复利就是利滚利。",
+        teaching: receiptWithSources([{ name: first.name, quote: "复利就是利滚利" }]),
+      },
+    },
+    { learnerText: "请只根据这一章带我理解复利。" },
+  ).find((check) => check.id === "book_quote_bound");
+  assert.ok(fabricated);
+  assert.equal(fabricated.passed, false);
+  assert.match(fabricated.detail, /逐字片段/);
+});
+
+test("网页引文必须逐字命中 verifiedQuote 并回传核验状态", () => {
+  const item = caseById("web-claim-binding");
+  const reference = item.references?.[0];
+  assert.ok(reference && reference.verifiedQuote);
+  const request: ChatRequest = {
+    ...requestFor(item, "请结合这份网页资料讲讲复利。", "start"),
+    references: item.references,
+    webSearch: true,
+  };
+  const good = evaluateTurnChecks(
+    ["web_claim_matched"],
+    {
+      request,
+      response: {
+        message: "资料给出的定义是复利在每个计息期把利息计入本金。",
+        teaching: receiptWithSources([
+          {
+            name: reference.name,
+            quote: reference.verifiedQuote,
+            url: reference.url,
+            retrievedAt: reference.retrievedAt,
+            verification: "claim_matched",
+            sourceTier: reference.sourceTier,
+          },
+        ]),
+      },
+    },
+    { learnerText: "请结合这份网页资料讲讲复利。" },
+  ).find((check) => check.id === "web_claim_matched");
+  assert.ok(good);
+  assert.equal(good.passed, true, good.detail);
+
+  const paraphrase = evaluateTurnChecks(
+    ["web_claim_matched"],
+    {
+      request,
+      response: {
+        message: "网页说复利就是利滚利。",
+        teaching: receiptWithSources([
+          { name: reference.name, quote: "复利就是利滚利", verification: "claim_matched" },
+        ]),
+      },
+    },
+    { learnerText: "请结合这份网页资料讲讲复利。" },
+  ).find((check) => check.id === "web_claim_matched");
+  assert.ok(paraphrase);
+  assert.equal(paraphrase.passed, false);
+  assert.match(paraphrase.detail, /没有逐字命中/);
+});
+
+test("outcome 指标：模拟数据只走流程，真实记录才 measured", () => {
+  const outcomeSuite = loadOutcomeSuite("eval/outcome-suite.example.json");
+  const outcomeCase: OutcomeCase = outcomeSuite.cases[0];
+  assert.ok(outcomeSuite.simulatedResponses);
+  const responses = outcomeSuite.simulatedResponses.cases[outcomeCase.id];
+  const now = Date.parse("2026-05-01T00:00:00.000Z");
+
+  const preScore = scoreOutcomeTest(outcomeCase.preTest, responses.preTest?.responses);
+  assert.deepEqual(preScore, { correct: 1, total: 2, answered: 2, missing: [], score: 0.5 });
+
+  const simulated = evaluateOutcomeCase(outcomeCase, {
+    responses,
+    source: "simulated",
+    now,
+  });
+  assert.equal(simulated.status, "simulated");
+  assert.equal(simulated.effect, "pending");
+  assert.deepEqual(simulated.scores, { pre: 0.5, post: 1, delayed: 0.5, transfer: 1 });
+  const gain = simulated.metrics.find((metric) => metric.id === "normalized_gain");
+  const retention = simulated.metrics.find((metric) => metric.id === "retention_rate");
+  const transfer = simulated.metrics.find((metric) => metric.id === "transfer_rate");
+  assert.equal(gain?.status, "simulated");
+  assert.equal(gain?.value, 1);
+  assert.equal(retention?.status, "simulated");
+  assert.equal(retention?.value, 0.5);
+  assert.equal(transfer?.status, "simulated");
+  assert.equal(transfer?.value, 1);
+  assert.equal(simulated.metrics.some((metric) => metric.status === "measured"), false);
+  assert.equal(simulated.scheduledAt, new Date(now + 86_400_000).toISOString());
+  assert.equal(simulated.delayedCompletedAt, simulated.scheduledAt);
+  assert.equal(summarizeOutcome([simulated]).exitCode, 2);
+  assert.equal(summarizeOutcome([simulated]).status, "simulated");
+
+  const recorded = evaluateOutcomeCase(outcomeCase, {
+    responses,
+    source: "recorded-human",
+    now,
+  });
+  assert.equal(recorded.status, "measured");
+  assert.equal(recorded.effect, "measured");
+  assert.ok(recorded.metrics.every((metric) => metric.status === "measured"));
+  assert.equal(summarizeOutcome([recorded]).exitCode, 0);
+
+  const skipped = evaluateOutcomeCase(outcomeCase, { source: "none", now });
+  assert.equal(skipped.status, "skipped");
+  assert.equal(skipped.effect, "pending");
+  assert.ok(skipped.metrics.every((metric) => metric.status === "skipped"));
+  assert.ok(skipped.metrics.every((metric) => metric.value === null));
+  assert.equal(summarizeOutcome([skipped]).exitCode, 2);
+
+  const early = evaluateOutcomeCase(outcomeCase, {
+    responses: {
+      ...responses,
+      delayedTest: { ...responses.delayedTest!, completedAtOffsetMs: 1000 },
+    },
+    source: "recorded-human",
+    now,
+  });
+  const earlyRetention = early.metrics.find((metric) => metric.id === "retention_rate");
+  assert.equal(earlyRetention?.status, "skipped");
+  assert.match(earlyRetention?.detail ?? "", /早于计划时间/);
+});
+
+test("--runs 统计只来自实际样本，CI 与 flaky 不伪造", () => {
+  const base = { id: "case", title: "用例", covers: [], durationMs: 0, turns: [] };
+  const passed: CaseReport = { ...base, status: "passed" };
+  const failed: CaseReport = { ...base, status: "failed" };
+  const errored: CaseReport = { ...base, id: "other", status: "error" };
+  const attempts = summarizeAttempts([passed, failed, passed, errored]);
+  assert.equal(attempts.attempts, 4);
+  assert.equal(attempts.passed, 2);
+  assert.equal(attempts.passRate, 0.5);
+  assert.ok(attempts.confidenceInterval);
+  assert.ok(attempts.confidenceInterval.low < 0.5 && attempts.confidenceInterval.high > 0.5);
+  assert.deepEqual(attempts.flakyCases, ["case"]);
+  assert.equal(attempts.cases.find((item) => item.id === "case")?.flaky, true);
+  assert.equal(attempts.cases.find((item) => item.id === "other")?.flaky, false);
+
+  assert.equal(wilsonInterval(0, 0), null);
+  assert.equal(wilsonInterval(5, 5)?.high, 1);
+  assert.equal(wilsonInterval(0, 5)?.low, 0);
+  assert.equal(summarizeAttempts([]).confidenceInterval, null);
+  assert.equal(summarizeAttempts([]).passRate, null);
+});
+
+test("CLI --list 列出新增夹具用例；缺失必需覆盖与模拟效果都退出非零", () => {
+  const list = runEvalCli(["--list"]);
+  assert.equal(list.status, 0, list.stderr);
+  assert.match(list.stdout, /graph-known-continuity/);
+  assert.match(list.stdout, /book-source-binding/);
+  assert.match(list.stdout, /web-claim-binding/);
+  assert.match(list.stdout, /graph-review-ready/);
+
+  const outcomeList = runEvalCli(["--outcome", "--list"]);
+  assert.equal(outcomeList.status, 0, outcomeList.stderr);
+  assert.match(outcomeList.stdout, /net-value-outcome/);
+
+  const noKey = runEvalCli(["--case", "opening-route", "--json"], {
+    GEMINI_API_KEY: "",
+    OPENAI_API_KEY: "",
+  });
+  assert.equal(noKey.status, 2, noKey.stderr);
+  const noKeyPayload = JSON.parse(noKey.stdout) as {
+    status: string;
+    live: boolean;
+    exitCode: number;
+  };
+  assert.equal(noKeyPayload.status, "skipped");
+  assert.equal(noKeyPayload.live, false);
+  assert.equal(noKeyPayload.exitCode, 2);
+
+  const offline = runEvalCli(["--outcome", "--offline", "--json"]);
+  assert.equal(offline.status, 2, offline.stderr);
+  const payload = JSON.parse(offline.stdout) as {
+    status: string;
+    completed: boolean;
+    summary: { effect: string };
+    cases: { status: string; effect: string; metrics: { status: string }[] }[];
+  };
+  assert.equal(payload.status, "simulated");
+  assert.equal(payload.completed, false);
+  assert.equal(payload.summary.effect, "pending");
+  assert.ok(payload.cases.every((item) => item.status === "simulated"));
+  assert.ok(payload.cases.every((item) => item.effect === "pending"));
+  assert.ok(payload.cases.every((item) => item.metrics.every((metric) => metric.status === "simulated")));
+
+  const temp = mkdtempSync(path.join(os.tmpdir(), "zhixu-eval-coverage-"));
+  try {
+    const suitePath = path.join(temp, "coverage-missing.json");
+    writeFileSync(
+      suitePath,
+      JSON.stringify({
+        version: 1,
+        name: "缺少必需覆盖",
+        defaults: { topic: "测试", level: "从零开始", goal: "测试覆盖门禁" },
+        cases: [
+          {
+            id: "only",
+            title: "只有开场",
+            covers: [],
+            turns: [{ action: "start", learner: "", expect: ["route"] }],
+          },
+        ],
+      }),
+    );
+    const missing = runEvalCli(["--suite", suitePath]);
+    assert.equal(missing.status, 2, missing.stderr);
+    assert.match(missing.stderr, /缺少发布门禁必需覆盖/);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });

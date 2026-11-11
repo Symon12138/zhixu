@@ -4,6 +4,7 @@ import type {
   ChatResponse,
   EvidenceKind,
   Flashcard,
+  KnowledgeDependencyKind,
   KnowledgeGraph,
   LearnerIntent,
   LearningAssessment,
@@ -16,11 +17,14 @@ import type {
   MasteryLevel,
   QuestionKind,
   QuizQuestion,
+  StepClaim,
   TeachingMove,
   TeachingNavigation,
   TeachingReceipt,
   TeachingSource,
+  LessonArtifact,
 } from "../src/types";
+import { ARTIFACT_MAX_BYTES } from "../src/types";
 import { addDependency, emptyGraph, propositionId } from "../src/lib/knowledgeGraph";
 import { exposesProtectedAnswer, explicitlyRequestsSolution, matchesProtectedNumbers } from "./answers";
 import { bindBookSources } from "./books";
@@ -31,7 +35,10 @@ export {
   parseQuestionContent,
   questionDraft,
   assessment,
+  hasDerivationChain,
+  hasIndependentReasoning,
   hasPriorReasoning,
+  parseDerivationChain,
   moves,
 } from "../src/lib/learningState";
 import {
@@ -40,11 +47,14 @@ import {
   parseQuestionContent,
   questionDraft,
   assessment,
+  hasDerivationChain,
+  hasIndependentReasoning,
   hasPriorReasoning,
+  parseDerivationChain,
   moves,
 } from "../src/lib/learningState";
 export type { QuestionContent, QuestionDraft } from "../src/lib/learningState";
-import type { QuestionContent, QuestionDraft } from "../src/lib/learningState";
+import type { DerivationChain, QuestionContent, QuestionDraft } from "../src/lib/learningState";
 
 export interface TeachingIssue {
   code: string;
@@ -56,6 +66,7 @@ export interface TeachingDirective {
   move: TeachingMove;
   focusStepId: string;
   assessment: LearningAssessment;
+  chain?: DerivationChain;
   navigation: TeachingNavigation;
   question: QuestionDraft | null;
   assumptions: string[];
@@ -70,19 +81,28 @@ export interface TutorDraft {
   plan?: string[];
   /** 路线规划时模型标注的步骤间前提关系（精确步骤标题）。 */
   dependencies?: PlanDependency[];
+  /** 原子命题声明：把每个步骤拆成 1–3 条可判定真假的陈述句。 */
+  claims?: StepClaim[];
   quiz?: QuizQuestion[];
   flashcards?: Flashcard[];
   sources: TeachingSource[];
   teaching?: TeachingDirective;
+  /** 本轮按需生成的可视化产物；草稿层只做结构解析，质量门禁在 checkTutorDraft。 */
+  artifact?: LessonArtifact;
 }
 
 /**
- * 模型输出的步骤依赖声明：from 是理解 to 的前提。
+ * 模型输出的步骤依赖声明：from 是理解 to 的前提（prerequisite），
+ * 或 from 沿 rule 推出 to（derivation）。
  * 只认 plan 中的精确标题，服务端再转成稳定的命题 id，避免模型编造 id。
  */
 export interface PlanDependency {
   from: string;
   to: string;
+  /** 依赖类型：prerequisite=前置，derivation=推导；缺省 prerequisite。 */
+  kind?: KnowledgeDependencyKind;
+  /** 一句话说明 from 如何推出 to；derivation 边必填。 */
+  rule?: string;
 }
 
 const intents: LearnerIntent[] = [
@@ -202,6 +222,8 @@ function parseCards(value: unknown): Flashcard[] {
   });
 }
 
+const dependencyKinds: KnowledgeDependencyKind[] = ["prerequisite", "derivation"];
+
 /** 解析模型给出的步骤依赖声明；结构非法时抛协议错误由修复轮重写。 */
 export function parsePlanDependencies(
   value: unknown,
@@ -213,11 +235,36 @@ export function parsePlanDependencies(
     return {
       from: text(data.from, `dependencies[${index}].from`, 300),
       to: text(data.to, `dependencies[${index}].to`, 300),
+      ...(data.kind === undefined
+        ? {}
+        : { kind: choice(data.kind, dependencyKinds, `dependencies[${index}].kind`) }),
+      ...(data.rule === undefined
+        ? {}
+        : { rule: text(data.rule, `dependencies[${index}].rule`, 300) }),
     };
   });
 }
 
-/** 依赖只能引用路线中的精确步骤标题，且步骤不能依赖自身。 */
+/** 解析模型给出的原子命题声明；结构非法时抛协议错误由修复轮重写。 */
+export function parseStepClaims(
+  value: unknown,
+): StepClaim[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const items = list(value, "claims", 18);
+  if (!items.length) return undefined;
+  return items.map((item, index) => {
+    const data = object(item, `claims[${index}]`);
+    return {
+      stepTitle: text(data.stepTitle, `claims[${index}].stepTitle`, 300),
+      statement: text(data.statement, `claims[${index}].statement`, 300),
+    };
+  });
+}
+
+/**
+ * 依赖只能引用路线中的精确步骤标题，且步骤不能依赖自身。
+ * derivation 依赖（由 from 推出 to）必须附带一句话 rule，否则拒绝。
+ */
 export function planDependencyIssues(
   plan: string[],
   dependencies: PlanDependency[],
@@ -234,8 +281,83 @@ export function planDependencyIssues(
         detail: `依赖 ${dependency.from} → ${dependency.to} 必须使用 plan 中步骤的精确标题`,
       });
     }
+    if (dependency.kind === "derivation" && !dependency.rule?.trim()) {
+      issues.push({
+        code: "dependency_rule_missing",
+        detail: `依赖 ${dependency.from} → ${dependency.to} 是推导关系，必须给出一句话 rule 说明由 from 如何推出 to`,
+      });
+    }
   }
   return issues;
+}
+
+/**
+ * 原子命题只能挂在路线中的精确步骤标题上；每步最多 3 条声明。
+ * 同一步骤重复同一 statement 视为冗余噪声，静默去重。
+ */
+export function stepClaimsIssues(
+  plan: string[],
+  claims: StepClaim[],
+): TeachingIssue[] {
+  const titles = new Set(plan);
+  const issues: TeachingIssue[] = [];
+  const counts = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const claim of claims) {
+    counts.set(claim.stepTitle, (counts.get(claim.stepTitle) ?? 0) + 1);
+    const dedupeKey = `${claim.stepTitle}::${claim.statement}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    if (!titles.has(claim.stepTitle)) {
+      issues.push({
+        code: "unknown_claim_step",
+        detail: `命题声明 ${claim.statement} 引用的步骤标题《${claim.stepTitle}》不在当前路线中`,
+      });
+    }
+  }
+  for (const [title, count] of counts) {
+    if (count > 3) {
+      issues.push({
+        code: "claim_count_exceeded",
+        detail: `步骤《${title}》声明了 ${count} 条命题，每步最多 3 条`,
+      });
+    }
+  }
+  return issues;
+}
+
+/** claims 去重后保留每步最多 3 条、标题在 plan 中的有效声明。 */
+export function normalizeStepClaims(
+  plan: string[],
+  claims: StepClaim[],
+): StepClaim[] {
+  const titles = new Set(plan);
+  const counts = new Map<string, number>();
+  const seen = new Set<string>();
+  const result: StepClaim[] = [];
+  for (const claim of claims) {
+    if (!titles.has(claim.stepTitle)) continue;
+    if ((counts.get(claim.stepTitle) ?? 0) >= 3) continue;
+    const dedupeKey = `${claim.stepTitle}::${claim.statement}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    counts.set(claim.stepTitle, (counts.get(claim.stepTitle) ?? 0) + 1);
+    result.push(claim);
+  }
+  return result;
+}
+
+/** 解析模型生成的可视化 artifact：只接受白名单类型的结构化字段。 */
+export function parseLessonArtifact(value: unknown): LessonArtifact {
+  const data = object(value, "artifact");
+  const kind = choice(data.kind, ["svg", "html"] as const, "artifact.kind");
+  return {
+    kind,
+    title: text(data.title, "artifact.title", 200),
+    content: text(data.content, "artifact.content", ARTIFACT_MAX_BYTES, true),
+    sources: strings(data.sources ?? [], "artifact.sources", 8, 0, 300),
+    textAlternative: text(data.textAlternative, "artifact.textAlternative", 2000),
+  };
 }
 
 export function parseTutorDraft(
@@ -271,6 +393,8 @@ export function parseTutorDraft(
     draft.plan = strings(data.plan, "plan", 6, 3, 300);
   if (data.dependencies !== undefined)
     draft.dependencies = parsePlanDependencies(data.dependencies);
+  if (data.claims !== undefined) draft.claims = parseStepClaims(data.claims);
+  if (data.artifact !== undefined) draft.artifact = parseLessonArtifact(data.artifact);
   if (action === "quiz") draft.quiz = parseQuiz(data.quiz);
   if (action === "flashcards") draft.flashcards = parseCards(data.flashcards);
   if (data.teaching !== undefined) {
@@ -281,6 +405,7 @@ export function parseTutorDraft(
       move: choice(directive.move, moves, "teaching.move"),
       focusStepId: text(directive.focusStepId, "teaching.focusStepId", 150),
       assessment: assessment(directive.assessment),
+      ...(directive.chain === undefined ? {} : { chain: parseDerivationChain(directive.chain) }),
       navigation: {
         kind: choice(navigation.kind, navigationKinds, "navigation.kind"),
         ...(navigation.targetStepId === undefined
@@ -352,21 +477,23 @@ function provenAfterAnswer(
   previousEvidence: LearningEvidence[],
   question: LearningQuestion,
   result: LearningAssessment,
+  chain?: DerivationChain,
 ): MasteryLevel {
   if (result.verdict === "incorrect" || result.verdict === "partial")
     return "learning";
   if (result.verdict !== "correct") return previous;
+  const evidence = result.demonstrated === "none" ? previousEvidence : [
+    ...previousEvidence,
+    { kind: result.demonstrated, questionId: question.id, question: question.prompt, quote: result.evidenceQuote, turn: 0, ...(chain ? { chain } : {}) },
+  ];
   if (
     result.demonstrated === "transfer" &&
     question.kind === "transfer" &&
     hasPriorReasoning(previousEvidence, question.id, question.prompt)
   )
     return "applied";
-  if (
-    result.demonstrated === "reasoning" &&
-    question.kind !== "orientation" &&
-    question.kind !== "diagnostic"
-  )
+  if (["reasoning", "derivation"].includes(result.demonstrated) && question.kind !== "orientation" && question.kind !== "diagnostic" &&
+    (hasDerivationChain(evidence) || hasIndependentReasoning(evidence)))
     return previous === "applied" ? "applied" : "understood";
   return previous === "new" ? "learning" : previous;
 }
@@ -423,6 +550,12 @@ export function checkTutorDraft(
     issue("web_source_required", "本轮使用了自动联网搜索证据，讲解至少需要引用一条抓取网页的逐字原文；没有引文就不能把网页搜索当成依据");
   }
   if (request.bookContext && !draft.sources.length) issue("book_source_required", "书籍陪读需要至少一条本轮原文的逐字引文，不能以模型常识冒充书中内容");
+  if (draft.artifact?.sources.length) {
+    const names = new Set((request.references ?? []).map((reference) => reference.name));
+    for (const name of draft.artifact.sources) {
+      if (!names.has(name)) issue("artifact_source_not_bound", "可视化讲解的来源必须逐字来自本轮提供的材料名称");
+    }
+  }
   for (const source of draft.sources) {
     if (
       !request.references?.some(
@@ -443,6 +576,18 @@ export function checkTutorDraft(
         "依赖标注只能随新学习路线一起给出；没有 plan 时不能凭空声明步骤前提",
       );
     else issues.push(...planDependencyIssues(draft.plan, draft.dependencies));
+  }
+  if (draft.claims?.length) {
+    // 命题声明是路线的一部分：必须随新 plan 一起给出，且引用其中的精确标题。
+    if (!draft.plan)
+      issue(
+        "claims_without_roadmap",
+        "命题声明只能随新学习路线一起给出；没有 plan 时不能凭空声明原子命题",
+      );
+    else {
+      issues.push(...stepClaimsIssues(draft.plan, draft.claims));
+      draft = { ...draft, claims: normalizeStepClaims(draft.plan, draft.claims) };
+    }
   }
   if (!coreActions.includes(request.action)) {
     if (
@@ -612,6 +757,11 @@ export function checkTutorDraft(
       "tool_is_not_evidence",
       "请导师安排下一步不是新作答：只能继续当前点或相邻授课，不认证旧回答、不清误区或擅自换主线",
     );
+  if (directive.chain && (state?.pendingQuestion?.kind !== "derivation" || result.verdict !== "correct" || result.demonstrated !== "derivation"))
+    issue("derivation_chain_not_grounded", "推导链只能来自推导题的正确完整作答，并由独立评审明确抽取");
+  if (state?.pendingQuestion?.kind === "derivation" && graded &&
+    (result.demonstrated !== "derivation" || !directive.chain))
+    issue("incomplete_derivation", "推导题必须分别核验至少两个前提、结论及边界或反例；一句结论复述不能算理解");
   if (graded && explicitlyRequestsSolution(learner.text)) issue("requested_solution_not_evidence", "明确索要完整答案的回合不认证为独立掌握；可完整讲解，但不能将请求本身记作作答证据");
   if (
     result.evidenceQuote &&
@@ -816,7 +966,7 @@ export function checkTutorDraft(
     const currentIndex = state.steps.findIndex(step => step.id === state.currentStepId);
     const current = state.steps[currentIndex];
     const pending = state.pendingQuestion;
-    const level = pending && pending.scope === "main" && graded ? provenAfterAnswer(current.mastery, current.evidence, pending, result) : current.mastery;
+    const level = pending && pending.scope === "main" && graded ? provenAfterAnswer(current.mastery, current.evidence, pending, result, directive.chain) : current.mastery;
     const correctRecognition = pending?.scope === "main" && pending.kind !== "orientation" && result.verdict === "correct" && result.demonstrated === "recognition";
     const askedToContinue = directive.intent === "continue" && (request.action === "continue" || /^(?:好的?|行|可以|那|请)?[，,\s]*(?:继续|接着讲|接着说|往下讲)[吧。!！\s]*$/.test(learner.text) || /下一(?:步|节|题|个概念|部分)|继续往后|先跳过|往后讲|\b(?:continue|next)\b/i.test(learner.text));
     if (state.detours.length || (!["understood", "applied"].includes(level) && !correctRecognition && !askedToContinue)) issue("premature_advance", "尚未回应当前困难，不能把它当作已学会后推进；用户可明确选择先继续，但不会获得掌握认证");
@@ -865,9 +1015,17 @@ export function checkTutorDraft(
       );
     else {
       const pending = state?.pendingQuestion;
+      // 补课是临时补基础：答对一道推理即视为补完，允许返回主线；
+      // 主线的 understood/applied 仍按推导链门槛，不因此放松。
       const level =
-        pending?.scope === "detour" && graded
-          ? provenAfterAnswer(detour.mastery, detour.evidence, pending, result)
+        pending?.scope === "detour" && graded &&
+        ["reasoning", "derivation"].includes(result.demonstrated) &&
+        !["orientation", "diagnostic"].includes(pending.kind)
+          ? detour.mastery === "new"
+            ? "understood"
+            : ["understood", "applied"].includes(detour.mastery)
+              ? detour.mastery
+              : "understood"
           : detour.mastery;
       if (
         request.action !== "resume" &&
@@ -957,6 +1115,7 @@ function recordAnswer(
   pending: LearningQuestion,
   result: LearningAssessment,
   turn: number,
+  chain?: DerivationChain,
 ) {
   const previousEvidence = target.evidence;
   target.mastery = provenAfterAnswer(
@@ -964,6 +1123,7 @@ function recordAnswer(
     previousEvidence,
     pending,
     result,
+    chain,
   );
   if (result.verdict === "correct" && result.demonstrated !== "none") {
     const previousIndex = previousEvidence.findIndex(
@@ -974,13 +1134,14 @@ function recordAnswer(
       questionId: pending.id,
       question: pending.prompt,
       kind: result.demonstrated,
+      ...(chain ? { chain } : {}),
       turn,
     };
     if (previousIndex === -1 && previousEvidence.length >= 200)
       invalid("单个主题证据已达容量上限，请导出并开启新学习", "state_capacity");
     // 同题同类型只保留一条：同级的新真实作答可更新，但弱证据不能覆盖强证据。
     // 推理与迁移是不同证据，二者都保留；升级后 applied 校验仍能查到已有推理。
-    const strength: Record<EvidenceKind, number> = { recognition: 0, reasoning: 1, transfer: 2 };
+    const strength: Record<EvidenceKind, number> = { recognition: 0, reasoning: 1, derivation: 2, transfer: 3 };
     const weaker = result.demonstrated === "recognition"
       ? previousEvidence.some(item => item.questionId === pending.id && strength[item.kind] > 0)
       : result.demonstrated === "reasoning" &&
@@ -999,6 +1160,8 @@ function recordAnswer(
  * 把模型标注的步骤依赖转成稳定命题 id 的依赖边。
  * checkTutorDraft 已校验 from/to 都是 plan 中的精确标题；
  * addDependency 再去重并拒绝自环/成环，模型不能靠依赖声明制造死循环。
+ * 原子命题（claims）不在服务端凭空沉淀：没有核验证据不生成命题节点，
+ * 声明随响应返回，由客户端在步骤核验通过时带证据沉淀。
  */
 function applyPlanDependencies(
   graph: KnowledgeGraph | undefined,
@@ -1014,6 +1177,12 @@ function applyPlanDependencies(
       propositionId(dependency.from),
       propositionId(dependency.to),
       createdAt,
+      dependency.kind === "derivation" || dependency.rule
+        ? {
+            kind: dependency.kind === "derivation" ? "derivation" : "prerequisite",
+            rule: dependency.rule?.trim() ? dependency.rule.trim() : undefined,
+          }
+        : undefined,
     );
   }
   return next.dependencies.length > previousCount ? next : undefined;
@@ -1049,6 +1218,9 @@ export function applyTutorDraft(
   const issues = checkTutorDraft(request, draft);
   if (issues.length) throw new LearningProtocolError(issues);
   const annotatedGraph = applyPlanDependencies(request.knowledgeGraph, draft);
+  const claims = draft.plan && draft.claims?.length
+    ? normalizeStepClaims(draft.plan, draft.claims)
+    : [];
   draft = { ...draft, sources: bindBookSources(draft.sources, request.references) };
   let state = existing ? structuredClone(existing) : undefined;
   let receipt: TeachingReceipt | undefined;
@@ -1065,7 +1237,7 @@ export function applyTutorDraft(
         previousPending.scope === "detour"
           ? state.detours.at(-1)
           : state.steps.find((step) => step.id === previousPending.stepId);
-      if (target) recordAnswer(target, previousPending, result, state.revision);
+      if (target) recordAnswer(target, previousPending, result, state.revision, directive.chain);
       if (directive.misconception) {
         const topic =
           previousPending.scope === "detour"
@@ -1269,6 +1441,8 @@ export function applyTutorDraft(
     ...(draft.flashcards ? { flashcards: draft.flashcards } : {}),
     ...(receipt ? { teaching: receipt } : {}),
     ...(annotatedGraph ? { knowledgeGraph: annotatedGraph } : {}),
+    ...(claims.length ? { claims } : {}),
+    ...(draft.artifact ? { artifact: draft.artifact } : {}),
     quality: {
       checked: true,
       repaired: review.repaired,

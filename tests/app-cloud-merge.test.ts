@@ -195,5 +195,5 @@ test("App 的本地时间写入与 applyCloudData 都走统一校准基准", asy
   assert.match(source, /Math\.max\(localNow\(\), s\.updatedAt \+ 1\)/);
   assert.match(source, /const merged = mergeCloudBackupIntoLocal\(/);
   assert.match(source, /rememberSettingsUpdatedAt\(localNow\(\)\)/);
-  assert.match(source, /const rated = rateReviewItem\(item, rating, now\)/);
+  assert.match(source, /const rated = \{ \.\.\.rateReviewItem\(item, rating, now\), updatedAt: now \};/);
 });

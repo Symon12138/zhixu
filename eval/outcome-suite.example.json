@@ -1,0 +1,129 @@
+{
+  "mode": "outcome",
+  "version": 1,
+  "name": "知序学习效果评测（示例协议）",
+  "description": "前测（held-out）→学习会话→立即后测→延迟后测→新情境迁移。示例内置 simulatedResponses，只用于 --offline 走通流程；模拟结果永远标记 pending，绝不算真实学习效果。真实数据请用 --responses 提供 source=recorded-human 的作答。",
+  "requiredCoverage": false,
+  "defaults": {
+    "topic": "银行理财：现金分红与净值",
+    "level": "从零开始",
+    "goal": "能解释现金分红对单位净值与累计净值的影响，并在新情境中算出正确结果"
+  },
+  "cases": [
+    {
+      "id": "net-value-outcome",
+      "title": "现金分红理解的前后测与延迟保持",
+      "description": "同一组学习目标下，前测与各次测试使用不同题目；延迟后测必须按计划时间完成才计算保持率。",
+      "covers": ["learning_gain", "retention", "transfer"],
+      "topic": "银行理财：现金分红与净值",
+      "level": "从零开始",
+      "goal": "能解释现金分红对单位净值与累计净值的影响，并在新情境中算出正确结果",
+      "turns": [
+        {
+          "action": "start",
+          "learner": "我想从零理解现金分红和单位净值、累计净值的关系。",
+          "expect": ["route"]
+        }
+      ],
+      "preTest": {
+        "items": [
+          {
+            "id": "pre-unit",
+            "prompt": "分红前单位净值 1.10，每份分红 0.05，且没有其它价格变动。分红后单位净值是多少？",
+            "expected": ["1.05"],
+            "kind": "numeric"
+          },
+          {
+            "id": "pre-cash",
+            "prompt": "每份现金分红 0.05 元时，客户每份收到的现金是多少元？",
+            "expected": ["0.05"],
+            "kind": "numeric"
+          }
+        ]
+      },
+      "postTest": {
+        "items": [
+          {
+            "id": "post-unit",
+            "prompt": "分红前单位净值 1.07，每份分红 0.05，且没有其它价格变动。分红后单位净值是多少？",
+            "expected": ["1.02"],
+            "kind": "numeric"
+          },
+          {
+            "id": "post-accumulated",
+            "prompt": "分红前累计净值 1.15，每份分红 0.05，产品没有其它收益。分红后累计净值是多少？",
+            "expected": ["1.10"],
+            "kind": "numeric"
+          }
+        ]
+      },
+      "delayedTest": {
+        "scheduleAfterMs": 86400000,
+        "items": [
+          {
+            "id": "delayed-unit",
+            "prompt": "一周后复盘：分红前单位净值 1.20，每份分红 0.15，分红后单位净值是多少？",
+            "expected": ["1.05"],
+            "kind": "numeric"
+          },
+          {
+            "id": "delayed-cash",
+            "prompt": "一周后复盘：每份分红 0.05 元，客户持有 2 份，共收到多少现金？",
+            "expected": ["0.10"],
+            "kind": "numeric"
+          }
+        ]
+      },
+      "transferTest": {
+        "items": [
+          {
+            "id": "transfer-dividend",
+            "prompt": "新情境：债券基金分红前单位净值 1.18，每份分红 0.08，分红后单位净值是多少？",
+            "expected": ["1.10"],
+            "kind": "numeric"
+          },
+          {
+            "id": "transfer-accumulated",
+            "prompt": "新情境：分红前累计净值 1.20，每份分红 0.08，产品没有其它收益，分红后累计净值是多少？",
+            "expected": ["1.12"],
+            "kind": "numeric"
+          }
+        ]
+      }
+    }
+  ],
+  "simulatedResponses": {
+    "source": "simulated",
+    "cohort": "example-only-not-real-learners",
+    "collectedAt": "2026-05-01T00:00:00.000Z",
+    "cases": {
+      "net-value-outcome": {
+        "preTest": {
+          "responses": {
+            "pre-unit": "1.05",
+            "pre-cash": "0.10"
+          }
+        },
+        "postTest": {
+          "responses": {
+            "post-unit": "1.02",
+            "post-accumulated": "1.10"
+          }
+        },
+        "delayedTest": {
+          "completedAtOffsetMs": 86400000,
+          "responses": {
+            "delayed-unit": "1.05",
+            "delayed-cash": "0.12"
+          }
+        },
+        "transferTest": {
+          "responses": {
+            "transfer-dividend": "1.10",
+            "transfer-accumulated": "1.12"
+          }
+        }
+      }
+    }
+  }
+}

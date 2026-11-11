@@ -515,7 +515,7 @@ docker compose exec -T nginx nginx -s reload
 | --- | --- | --- |
 | 安装 | `npm ci --no-audit --no-fund --registry=https://registry.npmjs.org --replace-registry-host=always` | 严格按 `package-lock.json`；lockfile 的 `resolved` 使用区域镜像，CI 改用官方 registry 拉取同版本 tarball |
 | 类型检查 | `npm run check` | `tsc -b` |
-| 回归 | `npm test` | 50 个测试文件；使用 `os.tmpdir()` 与回环端口，不访问外部网络 |
+| 回归 | `npm test` | 61 个测试文件；使用 `os.tmpdir()` 与回环端口，不访问外部网络 |
 | 构建 | `npm run build` | `tsc -b && vite build` |
 
 - CI **不配置任何模型/搜索密钥**，也不读取 `.env`。测试中的 key 都是假值；`server/index.ts` 只在真实入口动态加载 dotenv，测试导入 `createApp` 不会读取仓库 `.env`。
