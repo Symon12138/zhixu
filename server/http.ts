@@ -343,7 +343,7 @@ function isModelFailure(error: unknown, status: number): boolean {
  * upstreamStatus 只在确属上游 HTTP 响应时出现。不输出 stack、提示或密钥。
  * 不依赖 NODE_ENV，非 Docker 的 `npm start` 同样能看到生产错误日志。
  */
-function logErrorResponse(res: Response, error: unknown, status: number): void {
+export function logErrorResponse(res: Response, error: unknown, status: number): void {
   if (status < 500 && !isModelFailure(error, status)) return;
   const requestId = res.req?.requestId ?? "unknown";
   const record: Record<string, unknown> = {
@@ -362,36 +362,19 @@ function logErrorResponse(res: Response, error: unknown, status: number): void {
 }
 
 /**
- * 统一错误映射，三条模型路由与 express 错误中间件共用：
- * - TeachingQualityError 保留原 status（422/504）、code 与公开 issues；
- * - LearningProtocolError → 422，不发布草稿细节；
- * - BookContextError / HttpError / ApiError 保留既有状态与稳定错误码；
- * - 其他未知异常 → 不泄密的 500。
- * 连接已断开或响应已发出时绝不再次写响应。
+ * 统一错误映射为可序列化 payload：JSON 响应与 SSE error 事件共用，
+ * 避免流已发出后又要写普通 JSON 响应时两套口径不一致。
  */
-export function writeErrorResponse(res: Response, error: unknown): void {
+export function publicErrorPayload(error: unknown): { status: number; body: Record<string, unknown> } {
   const status = errorResponseStatus(error);
-  logErrorResponse(res, error, status);
-  if (res.headersSent || res.writableEnded || res.destroyed) return;
   if (error instanceof TeachingQualityError) {
-    res.status(error.status).json({
-      error: error.message,
-      code: error.code,
-      issues: publicTeachingIssues(error.issues),
-    });
-    return;
+    return { status, body: { error: error.message, code: error.code, issues: publicTeachingIssues(error.issues) } };
   }
   if (error instanceof LearningProtocolError) {
-    res.status(422).json({
-      error: "教学内容与服务端约定不符，本轮未提交任何进度。",
-      code: "TEACHING_PROTOCOL",
-      issues: publicTeachingIssues(error.issues),
-    });
-    return;
+    return { status, body: { error: "教学内容与服务端约定不符，本轮未提交任何进度。", code: "TEACHING_PROTOCOL", issues: publicTeachingIssues(error.issues) } };
   }
   if (error instanceof BookContextError) {
-    res.status(400).json({ error: error.message });
-    return;
+    return { status, body: { error: error.message } };
   }
   if (error instanceof HttpError) {
     const body: Record<string, unknown> = { error: error.message };
@@ -401,28 +384,30 @@ export function writeErrorResponse(res: Response, error: unknown): void {
         if (key !== "error" && key !== "code") body[key] = value;
       }
     }
-    res.status(error.status).json(body);
-    return;
+    return { status, body };
   }
   if (error instanceof ApiError) {
     const body: Record<string, unknown> = { error: error.message };
     if (error.code) body.code = error.code;
-    res.status(error.status).json(body);
-    return;
+    return { status, body };
   }
   const anyErr = error as { type?: unknown; limit?: unknown } | undefined;
   if (anyErr && typeof anyErr === "object") {
     if (anyErr.type === "entity.too.large") {
-      res.status(413).json({
-        error: `请求体过大，最大允许 ${formatBodyLimit(anyErr.limit)}。`,
-      });
-      return;
+      return { status, body: { error: `请求体过大，最大允许 ${formatBodyLimit(anyErr.limit)}。` } };
     }
     if (anyErr.type === "entity.parse.failed") {
-      res.status(400).json({ error: "请求体不是合法的 JSON。" });
-      return;
+      return { status, body: { error: "请求体不是合法的 JSON。" } };
     }
   }
   // 未知异常不回显任何内容，避免泄漏内部信息或密钥。
-  res.status(500).json({ error: "服务器内部错误，请稍后重试。" });
+  return { status, body: { error: "服务器内部错误，请稍后重试。" } };
+}
+
+/** 统一错误响应：JSON 路径写状态码与 payload；流已发出时由调用方改用 SSE error 事件。 */
+export function writeErrorResponse(res: Response, error: unknown): void {
+  const { status, body } = publicErrorPayload(error);
+  logErrorResponse(res, error, status);
+  if (res.headersSent || res.writableEnded || res.destroyed) return;
+  res.status(status).json(body);
 }

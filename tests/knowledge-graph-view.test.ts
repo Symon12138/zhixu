@@ -31,6 +31,10 @@ interface KnowledgeGraphViewModule {
   formatVerifiedAt: (timestamp: number) => string;
   KG_NODE_WIDTH: number;
   KG_NODE_HEIGHT: number;
+  listMergeCandidates: (
+    propositions: readonly KnowledgeProposition[],
+    selected: KnowledgeProposition,
+  ) => KnowledgeProposition[];
 }
 
 let view: KnowledgeGraphViewModule;
@@ -336,4 +340,86 @@ test("App 注册知识图谱入口、标题与路由，并从本地工作区读�
   assert.match(source, /graph=\{graph\}/);
   assert.match(source, /onOpenSession=\{\(sessionId\) => \{/);
   assert.match(source, /openSession\(target\)/);
+  assert.match(source, /onEditProposition=\{\(id, patch\) =>/);
+  assert.match(source, /editProposition\(previous, id, patch, localNow\(\)\)/);
+  assert.match(source, /onDeleteProposition=\{\(id\) =>/);
+  assert.match(source, /deleteProposition\(previous, id\)/);
+  assert.match(source, /onMergePropositions=\{\(keepId, mergeId\) =>/);
+  assert.match(source, /mergePropositions\(previous, keepId, mergeId, localNow\(\)\)/);
+});
+
+test("图谱详情面板在提供管理回调时提供编辑、合并与删除控件", () => {
+  const html = render({
+    graph: GRAPH,
+    sessions: SESSIONS,
+    onEditProposition: () => {},
+    onDeleteProposition: () => {},
+    onMergePropositions: () => {},
+  });
+  assert.match(html, /class="kg-manage"/);
+  assert.match(html, /编辑这条命题/);
+  assert.match(html, /保存修改/);
+  assert.match(html, /合并重复命题/);
+  assert.match(html, /并入所选命题/);
+  assert.match(html, /删除这条命题/);
+  assert.match(html, /name="statement"/);
+  assert.match(html, /name="topic"/);
+  assert.match(html, /name="keepId"/);
+});
+
+test("未提供管理回调时详情面板不出现删除或编辑控件", () => {
+  const html = render({ graph: GRAPH, sessions: SESSIONS });
+  assert.doesNotMatch(html, /class="kg-manage"/);
+  assert.doesNotMatch(html, /删除这条命题/);
+  assert.doesNotMatch(html, /保存修改/);
+});
+
+test("合并候选排除当前命题并把同主题命题排在最前", () => {
+  const candidates = view.listMergeCandidates(GRAPH.propositions, DERIVATIVE);
+  assert.ok(!candidates.some((proposition) => proposition.id === DERIVATIVE.id));
+  assert.equal(candidates.length, GRAPH.propositions.length - 1);
+  assert.equal(candidates[0].id, CHAIN.id, "同主题的链式法则应优先");
+  assert.equal(candidates[1].id, LIMIT.id);
+});
+
+test("提供笔记与导入回调时展示候选导入面板", () => {
+  const html = render({
+    graph: GRAPH,
+    sessions: SESSIONS,
+    notes: [
+      {
+        id: "note-1",
+        sessionId: "session-calculus",
+        title: "导数笔记",
+        content: "导数是瞬时变化率。切线斜率等于该点导数。",
+        createdAt: VERIFIED_AT,
+      },
+    ],
+    onImportFromNote: () => {},
+  });
+  assert.match(html, /class="kg-import"/);
+  assert.match(html, /从笔记导入/);
+  assert.match(html, /导数笔记/);
+  assert.match(html, /待核验/);
+});
+
+test("没有笔记或导入回调时不渲染笔记导入面板", () => {
+  const withoutNotes = render({ graph: GRAPH, sessions: SESSIONS, onImportFromNote: () => {} });
+  assert.doesNotMatch(withoutNotes, /class="kg-import"/);
+  const withoutHandler = render({
+    graph: GRAPH,
+    sessions: SESSIONS,
+    notes: [{ id: "n", sessionId: "s", title: "笔记", content: "内容足够长的一句话。", createdAt: 1 }],
+  });
+  assert.doesNotMatch(withoutHandler, /class="kg-import"/);
+});
+
+test("App 接线笔记导入与容量提示，来源写入知识图谱", () => {
+  const source = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /addPropositionsFromNote/);
+  assert.match(source, /GRAPH_PROPOSITION_LIMIT/);
+  assert.match(source, /notes=\{notes\}/);
+  assert.match(source, /onImportFromNote=\{\(noteId, statements\) => \{/);
+  assert.match(source, /result\.added/);
+  assert.match(source, /result\.rejected/);
 });

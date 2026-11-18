@@ -180,7 +180,13 @@ function isKnowledgeProposition(value: unknown): boolean {
   if (!isString(value.topic)) return false;
   if (!isString(value.sourceSessionId)) return false;
   if (!isNumber(value.verifiedAt)) return false;
-  if (value.strength !== "understood" && value.strength !== "applied") return false;
+  if (
+    value.strength !== "noted" &&
+    value.strength !== "understood" &&
+    value.strength !== "applied"
+  )
+    return false;
+  if (value.sourceNoteId !== undefined && !isString(value.sourceNoteId)) return false;
   const evidence = value.evidence;
   return Array.isArray(evidence) && evidence.every(isKnowledgeEvidence);
 }
@@ -196,11 +202,20 @@ function isKnowledgeDependency(value: unknown): boolean {
  * 知识图谱结构校验：命题/依赖都必须是数组，元素字段齐全且类型正确。
  * 本地存储读取与备份导入共用，坏图谱一律不得进入状态或云端。
  * 旧备份没有该字段时由调用方按空图谱处理（这里只校验出现时的形状）。
+ * deletedPropositionIds 可选（旧数据缺省视为空），出现时必须是字符串 id 数组。
  */
 export function isKnowledgeGraph(value: unknown): value is KnowledgeGraph {
   if (!isObject(value)) return false;
   const { propositions, dependencies } = value;
   if (!Array.isArray(propositions) || !Array.isArray(dependencies)) return false;
+  if (
+    value.deletedPropositionIds !== undefined &&
+    (!Array.isArray(value.deletedPropositionIds) ||
+      !value.deletedPropositionIds.every(
+        (id: unknown) => isString(id) && id.trim() !== "",
+      ))
+  )
+    return false;
   return (
     propositions.every(isKnowledgeProposition) &&
     dependencies.every(isKnowledgeDependency)

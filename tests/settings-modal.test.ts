@@ -147,3 +147,45 @@ test("删除按钮处理器调用 deleteCredentials 并清空本地密钥字段"
   assert.match(source, /else onSave\(cleared\)/);
   assert.match(source, /onClick=\{\(\) => void deleteSavedCredentials\(\)\}/);
 });
+
+test("设置面板渲染教学偏好输入与只读系统提示，缺省时隐藏", () => {
+  const prompts = { writer: "写作提示全文", review: "独立评审提示全文", bookWriter: "书籍陪读提示全文" };
+  const withExtras = render(SAVED, {
+    teachingInstructions: "多用生活类比",
+    onTeachingInstructionsChange: () => undefined,
+    systemPrompts: prompts,
+  });
+  assert.match(withExtras, /教学偏好（可覆盖讲解风格，不改规则）/);
+  assert.match(withExtras, /id="teaching-instructions"/);
+  assert.match(withExtras, /maxLength="2000"/i);
+  assert.match(withExtras, /多用生活类比/);
+  assert.match(withExtras, /只读/);
+  assert.match(withExtras, /写作提示全文/);
+  assert.match(withExtras, /独立评审提示全文/);
+  assert.match(withExtras, /书籍陪读提示全文/);
+  assert.match(withExtras, /独立评审提示不可覆盖/);
+
+  // 未取到系统提示、未提供偏好回调时都不渲染对应区块。
+  const bare = render(SAVED);
+  assert.doesNotMatch(bare, /id="teaching-instructions"/);
+  assert.doesNotMatch(bare, /系统提示（只读）/);
+  // 提供回调但尚无提示数据：只显示偏好编辑，不伪造提示内容。
+  const pendingPrompts = render(SAVED, { onTeachingInstructionsChange: () => undefined });
+  assert.match(pendingPrompts, /id="teaching-instructions"/);
+  assert.doesNotMatch(pendingPrompts, /系统提示（只读）/);
+});
+
+test("App 把追加式教学偏好与系统提示接入设置面板和 /api/chat", () => {
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /teachingInstructions=\{teachingInstructions\}/);
+  assert.match(app, /onTeachingInstructionsChange=\{\(value\) => \{/);
+  assert.match(app, /systemPrompts=\{systemPrompts\}/);
+  assert.match(app, /fetch\("\/api\/prompts"/);
+  assert.match(app, /Accept: "text\/event-stream"/);
+  assert.match(app, /readChatStream\(response/);
+  assert.match(app, /\.\.\.\(teachingInstructions\.trim\(\) \? \{ teachingInstructions: teachingInstructions\.trim\(\) \} : \{\}\)/);
+  // 阶段来自服务端事件，不是客户端计时器；取消有明确反馈。
+  assert.match(app, /setTeachingPhase\(phase\)/);
+  assert.match(app, /teachingPhase\s*\?\s*teachingPhase\.label/);
+  assert.match(app, /已取消本轮教学，未提交任何进度/);
+});

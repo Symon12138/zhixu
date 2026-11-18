@@ -225,7 +225,15 @@ function composeDecision(request: ChatRequest, content: LessonContent, raw: unkn
   const questionId = graded || verdict === "uncertain" ? state?.pendingQuestion?.id ?? null : null;
   if (rawAssessment?.questionId !== undefined && rawAssessment.questionId !== questionId) fail("conflicting_question", "评审绑定了另一道问题，不能将其当作本轮问题的证据");
   const feedback = rawAssessment?.feedback ?? (graded ? undefined : verdict === "uncertain" ? "先补基础，本轮不计为已理解。" : "本轮没有新增独立作答证据。");
-  const assessment: Record<string, unknown> = { verdict, evidenceQuote: quote, questionId, demonstrated: rawAssessment?.demonstrated ?? "none", feedback };
+  const assessment: Record<string, unknown> = {
+    verdict,
+    evidenceQuote: quote,
+    questionId,
+    demonstrated: rawAssessment?.demonstrated ?? "none",
+    feedback,
+    // 置信度只来自学习者自报，不接受模型编造；旧客户端不传时省略。
+    ...(request.answerConfidence ? { confidence: request.answerConfidence } : {}),
+  };
   const misconception = normalizeMisconception(decision.misconception, repairs);
   const canonical = {
     message: content.message, title: content.title, plan: content.plan, sources: content.sources, quiz: content.quiz, flashcards: content.flashcards,

@@ -16,7 +16,8 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import type { ProviderSettings, ServerConfig, StudySession } from "../types";
+import type { ProviderSettings, PromptBundle, ServerConfig, StudySession } from "../types";
+import { MAX_TEACHING_INSTRUCTIONS } from "../types";
 import type { Fetcher } from "../lib/cloudSync";
 import {
   clearCredentialSettings,
@@ -41,6 +42,9 @@ export function SettingsModal({
   expectedUserId,
   savedCredentials,
   onDeleted,
+  teachingInstructions,
+  onTeachingInstructionsChange,
+  systemPrompts,
 }: {
   initial: ProviderSettings;
   config: ServerConfig;
@@ -61,6 +65,11 @@ export function SettingsModal({
   savedCredentials?: boolean;
   /** 删除成功后的回调；未提供时通过 onSave 把清空后的配置同步回应用。 */
   onDeleted?: (value: ProviderSettings) => void;
+  /** 追加式教学偏好（本地保存，仅补充写作导师提示，不改核心协议与评审）。 */
+  teachingInstructions?: string;
+  onTeachingInstructionsChange?: (value: string) => void;
+  /** GET /api/prompts 返回的系统提示全文，供只读查看；未取到时省略查看区。 */
+  systemPrompts?: PromptBundle | null;
 }) {
   const [value, setValue] = useState(initial);
   const [showKey, setShowKey] = useState(false);
@@ -579,6 +588,46 @@ export function SettingsModal({
                 {deletingCredentials ? "正在删除…" : "删除已保存的个人配置"}
               </button>
             </div>
+          </div>
+        )}
+        {onTeachingInstructionsChange && (
+          <div className="settings-section">
+            <h3>教学偏好（可覆盖讲解风格，不改规则）</h3>
+            <label htmlFor="teaching-instructions">
+              追加给写作导师的补充约束
+              <textarea
+                id="teaching-instructions"
+                value={teachingInstructions ?? ""}
+                maxLength={MAX_TEACHING_INSTRUCTIONS}
+                rows={3}
+                placeholder="例如：多用生活类比、每个概念先给一个反例"
+                onChange={(event) => onTeachingInstructionsChange(event.target.value)}
+              />
+            </label>
+            <span className="field-help">
+              仅补充讲解风格与侧重，不能改变 JSON 输出、题目答案保护或独立评审标准；
+              最多 {MAX_TEACHING_INSTRUCTIONS} 字符，只保存在本机，不写入学习备份。
+            </span>
+          </div>
+        )}
+        {systemPrompts && (
+          <div className="settings-section">
+            <h3>系统提示（只读）</h3>
+            <span className="field-help">
+              以下是服务端实际使用的系统提示。独立评审提示不可覆盖，以保证讲解质量与答案保护。
+            </span>
+            <details className="prompt-viewer">
+              <summary>写作导师提示</summary>
+              <pre>{systemPrompts.writer}</pre>
+            </details>
+            <details className="prompt-viewer">
+              <summary>独立评审提示</summary>
+              <pre>{systemPrompts.review}</pre>
+            </details>
+            <details className="prompt-viewer">
+              <summary>书籍陪读提示</summary>
+              <pre>{systemPrompts.bookWriter}</pre>
+            </details>
           </div>
         )}
         <div className="privacy-note">

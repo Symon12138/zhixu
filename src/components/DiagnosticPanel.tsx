@@ -1,17 +1,25 @@
 import { Compass, RotateCcw } from "lucide-react";
-import type { DiagnosticProfile } from "../types";
+import type { ConfidenceLevel, DiagnosticProfile } from "../types";
+import { CONFIDENCE_LABELS, CONFIDENCE_LEVELS } from "../types";
+import { highConfidenceErrorRatio } from "../lib/diagnostic";
 import { RichText } from "./RichText";
 
 export function DiagnosticPanel({
   profile,
   busy,
+  confidence,
   onChange,
+  onConfidenceChange,
   onSubmit,
   onRestart,
 }: {
   profile: DiagnosticProfile;
   busy?: boolean;
+  /** 每题自报置信度；旧诊断没有时为空。 */
+  confidence?: Record<string, ConfidenceLevel>;
   onChange: (answers: Record<string, number>) => void;
+  /** 记录/取消某题置信度；未提供时不渲染置信度控件。 */
+  onConfidenceChange?: (questionId: string, level: ConfidenceLevel | undefined) => void;
   onSubmit: () => void;
   onRestart?: () => void;
 }) {
@@ -37,6 +45,14 @@ export function DiagnosticPanel({
             {profile.topic} · {profile.level} · 答对 {correctCount} /{" "}
             {questions.length} 题。这只是识别出的起点，不等于已经掌握。
           </p>
+          {(profile.confidenceRecorded ?? 0) > 0 && (
+            <p className="confidence-summary">
+              高置信错误：{profile.highConfidenceErrors ?? 0} /{" "}
+              {profile.confidenceRecorded} 道记录了置信度的题（
+              {Math.round(highConfidenceErrorRatio(profile) * 100)}%）。
+              这些题表示“很确定却答错”，会优先原地修复，不能直接推进。
+            </p>
+          )}
         </div>
         {(profile.weakConcepts.length > 0 ||
           profile.skippedConcepts.length > 0 ||
@@ -118,6 +134,16 @@ export function DiagnosticPanel({
                   </strong>
                   <RichText>{question.explanation}</RichText>
                 </div>
+                {profile.confidence?.[question.id] && (
+                  <p className="confidence-result">
+                    作答置信度：{CONFIDENCE_LABELS[profile.confidence[question.id]]}
+                    {profile.confidence[question.id] === "high" && !isCorrect
+                      ? "。高置信错误：这是需要优先原地修复的误区，不能直接推进。"
+                      : isCorrect && profile.confidence[question.id] !== "high"
+                        ? "。答对但把握不高，可能是蒙对，不能据此跳过前置。"
+                        : ""}
+                  </p>
+                )}
               </article>
             );
           })}
@@ -193,6 +219,32 @@ export function DiagnosticPanel({
                   <RichText>{question.hint}</RichText>
                 </div>
               </details>
+              {onConfidenceChange && (
+                <div
+                  className="confidence-row"
+                  role="group"
+                  aria-label={`第 ${index + 1} 题作答置信度`}
+                >
+                  <span className="confidence-label">作答时有多确定？</span>
+                  {CONFIDENCE_LEVELS.map((level) => (
+                    <button
+                      type="button"
+                      key={level}
+                      className={`confidence-button${confidence?.[question.id] === level ? " active" : ""}`}
+                      aria-pressed={confidence?.[question.id] === level}
+                      disabled={busy}
+                      onClick={() =>
+                        onConfidenceChange(
+                          question.id,
+                          confidence?.[question.id] === level ? undefined : level,
+                        )
+                      }
+                    >
+                      {CONFIDENCE_LABELS[level]}
+                    </button>
+                  ))}
+                </div>
+              )}
             </article>
           );
         })}

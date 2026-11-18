@@ -1,4 +1,4 @@
-import type { DiagnosticProfile, QuizQuestion } from "../types";
+import type { ConfidenceLevel, DiagnosticProfile, QuizQuestion } from "../types";
 
 /**
  * 学习前诊断：基于主题诊断题（QuizQuestion）的真实作答，产出能力画像。
@@ -26,6 +26,8 @@ export interface DiagnosticEvaluateInput {
   questions: DiagnosticQuestionInput[];
   answers: Record<string, number>;
   submitted: boolean;
+  /** 先验探测目标（来自知识图谱），旧诊断没有。 */
+  probeTargets?: { questionId: string; statement: string }[];
 }
 
 export interface DiagnosticEvaluation {
@@ -34,6 +36,10 @@ export interface DiagnosticEvaluation {
   evidenceSummary: string[];
   weakConcepts: string[];
   skippedConcepts: string[];
+  /** 已作答且自报高置信、但答错的题数。 */
+  highConfidenceErrors: number;
+  /** 带置信度记录的已作答题数。 */
+  confidenceRecorded: number;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -175,6 +181,33 @@ export function validateDiagnosticProfile(
   ) {
     throw new Error(`${context}：recommendedStepIndex 必须是非负整数`);
   }
+  // 以下字段是 T5 新增的可选记录；旧诊断缺省即合法，存在时必须自洽。
+  if (profile.confidence !== undefined) {
+    const confidence = profile.confidence;
+    if (!isPlainRecord(confidence)) {
+      throw new Error(`${context}：confidence 必须是对象`);
+    }
+    for (const [questionId, level] of Object.entries(confidence)) {
+      if (!questionIds.has(questionId)) {
+        throw new Error(`${context}：置信度记录包含未知题 ${questionId}`);
+      }
+      if (level !== "low" && level !== "medium" && level !== "high") {
+        throw new Error(`${context}：题 ${questionId} 的置信度必须是 low/medium/high`);
+      }
+    }
+  }
+  for (const key of ["highConfidenceErrors", "confidenceRecorded"] as const) {
+    const count = profile[key];
+    if (
+      count !== undefined &&
+      (typeof count !== "number" || !Number.isInteger(count) || count < 0)
+    ) {
+      throw new Error(`${context}：${key} 必须是非负整数`);
+    }
+  }
+  if (profile.probeTargets !== undefined) {
+    validateProbeTargets(profile.probeTargets, profile.questions as QuizQuestion[], context);
+  }
   return value as unknown as DiagnosticProfile;
 }
 
@@ -215,6 +248,7 @@ export function evaluateDiagnostic(
   questions: QuizQuestion[],
   answers: Record<string, number>,
   now: number,
+  confidence?: Record<string, ConfidenceLevel>,
 ): DiagnosticEvaluation {
   const context = "诊断评价";
   requireNow(now, context);
@@ -232,11 +266,26 @@ export function evaluateDiagnostic(
       throw new Error(`${context}：作答记录包含未知题 ${answerId}`);
     }
   }
+  // 置信度是自报元认知，只允许 low/medium/high，且必须对应真实题目。
+  const confidenceMap = confidence ?? {};
+  if (!isPlainRecord(confidenceMap)) {
+    throw new Error(`${context}：置信度记录必须为对象`);
+  }
+  for (const [questionId, level] of Object.entries(confidenceMap)) {
+    if (!questions.some((question) => question.id === questionId)) {
+      throw new Error(`${context}：置信度记录包含未知题 ${questionId}`);
+    }
+    if (level !== "low" && level !== "medium" && level !== "high") {
+      throw new Error(`${context}：题 ${questionId} 的置信度必须是 low/medium/high`);
+    }
+  }
 
   const weakConcepts: string[] = [];
   const skippedConcepts: string[] = [];
   const evidenceSummary: string[] = [];
   let firstUnresolvedIndex = -1;
+  let highConfidenceErrors = 0;
+  let confidenceRecorded = 0;
 
   questions.forEach((question, index) => {
     const answer = answers[question.id];
@@ -268,6 +317,16 @@ export function evaluateDiagnostic(
       );
       if (firstUnresolvedIndex < 0) firstUnresolvedIndex = index;
     }
+    const level = confidenceMap[question.id];
+    if (level) {
+      confidenceRecorded += 1;
+      if (level === "high" && answer !== question.correctIndex) {
+        highConfidenceErrors += 1;
+        evidenceSummary.push(
+          `第${index + 1}题自报“很确定”却答错：属于高置信错误，必须原地修复该误区，不能推进。`,
+        );
+      }
+    }
   });
 
   if (firstUnresolvedIndex < 0) {
@@ -282,7 +341,41 @@ export function evaluateDiagnostic(
     evidenceSummary,
     weakConcepts,
     skippedConcepts,
+    highConfidenceErrors,
+    confidenceRecorded,
   };
+}
+
+/** 先验探测目标必须对应真实题目；旧诊断没有该字段。 */
+function validateProbeTargets(
+  value: unknown,
+  questions: { id: string }[],
+  context: string,
+): { questionId: string; statement: string }[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 3) {
+    throw new Error(`${context}：探测目标必须是最多 3 条的非空数组`);
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${context}：第 ${index + 1} 条探测目标格式不正确`);
+    }
+    const record = item as Record<string, unknown>;
+    if (
+      typeof record.questionId !== "string" ||
+      !questions.some((question) => question.id === record.questionId)
+    ) {
+      throw new Error(`${context}：第 ${index + 1} 条探测目标未对应诊断题`);
+    }
+    if (
+      typeof record.statement !== "string" ||
+      !record.statement.trim() ||
+      record.statement.length > 2000
+    ) {
+      throw new Error(`${context}：第 ${index + 1} 条探测目标的命题说明不合法`);
+    }
+    return { questionId: record.questionId, statement: record.statement };
+  });
 }
 
 /** 创建诊断画像（未提交状态）。answers 初始为空，等待真实作答。 */
@@ -301,6 +394,7 @@ export function createDiagnosticProfile(
     throw new Error(`${context}：诊断题不能为空`);
   }
   input.questions.forEach((question) => validateQuizQuestion(question, context));
+  const probeTargets = validateProbeTargets(input.probeTargets, input.questions, context);
   return {
     id: options.newId(),
     topic,
@@ -312,6 +406,7 @@ export function createDiagnosticProfile(
     evidenceSummary: [],
     weakConcepts: [],
     skippedConcepts: [],
+    ...(probeTargets ? { probeTargets } : {}),
   };
 }
 
@@ -323,6 +418,7 @@ export function submitDiagnostic(
   profile: DiagnosticProfile,
   answers: Record<string, number>,
   now: number,
+  confidence?: Record<string, ConfidenceLevel>,
 ): DiagnosticProfile {
   assertDiagnosticProfile(profile, "提交的对象");
   requireNow(now, "诊断提交");
@@ -337,7 +433,8 @@ export function submitDiagnostic(
       throw new Error(`诊断提交：作答记录包含未知题 ${answerId}`);
     }
   }
-  const evaluation = evaluateDiagnostic(profile.questions, answers, now);
+  const evaluation = evaluateDiagnostic(profile.questions, answers, now, confidence);
+  const recordedConfidence = confidence && Object.keys(confidence).length > 0 ? { ...confidence } : undefined;
   return {
     ...profile,
     answers: { ...answers },
@@ -347,5 +444,15 @@ export function submitDiagnostic(
     evidenceSummary: evaluation.evidenceSummary,
     weakConcepts: evaluation.weakConcepts,
     skippedConcepts: evaluation.skippedConcepts,
+    ...(recordedConfidence ? { confidence: recordedConfidence } : {}),
+    highConfidenceErrors: evaluation.highConfidenceErrors,
+    confidenceRecorded: evaluation.confidenceRecorded,
   };
+}
+
+/** 高置信错误占已记录置信度题目的比例；未记录时返回 0，不伪造校准数据。 */
+export function highConfidenceErrorRatio(profile: Pick<DiagnosticProfile, "highConfidenceErrors" | "confidenceRecorded">): number {
+  const recorded = profile.confidenceRecorded ?? 0;
+  if (recorded <= 0) return 0;
+  return (profile.highConfidenceErrors ?? 0) / recorded;
 }

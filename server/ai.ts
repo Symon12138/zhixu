@@ -2,11 +2,13 @@ import type {
   ChatRequest,
   ChatResponse,
   ModelUsage,
+  PhaseEvent,
   Provider,
   ProviderSettings,
   ThinkingLevel,
 } from "../src/types";
 import {
+  PHASE_LABELS,
   runTeachingTurn,
   type ModelInvoker,
   type ModelInvocation,
@@ -750,7 +752,7 @@ function withModelUsage(
  */
 export async function chatCompletion(
   req: ChatRequest,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; onPhase?: (event: PhaseEvent) => void },
 ): Promise<ChatResponse> {
   let request = req;
   if (req.webSearch) {
@@ -762,6 +764,7 @@ export async function chatCompletion(
       throw new ApiError(400, "书籍陪读的来源由当前原书决定，不能同时自动联网搜索。", { code: "invalid_request" });
     }
     try {
+      options?.onPhase?.({ phase: "search", label: PHASE_LABELS.search });
       const searchReferences = await searchWebEvidence(buildWebSearchQuery(req), {
         ...(personalProviders.length ? { providers: personalProviders } : {}),
         ...(options?.signal ? { signal: options.signal } : {}),
@@ -808,6 +811,7 @@ export async function chatCompletion(
       const response = await runTeachingTurn(request, pipeline.invoke, {
         signal: options?.signal,
         maxWriterRevisions: pipeline.maxWriterRevisions,
+        ...(options?.onPhase ? { onPhase: options.onPhase } : {}),
       });
       return withModelUsage(response, config.model, index > 0, usage);
     } catch (error) {

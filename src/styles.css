@@ -1928,6 +1928,47 @@ svg {
   font-size: 9px;
   line-height: 1.7;
 }
+/* 置信度是学习者自报的元认知信息，不是掌握证据；样式只做清晰可选。 */
+.answer-confidence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 8px;
+  color: #66745f;
+  font-size: 11px;
+}
+.answer-confidence .text-button,
+.confidence-button {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: #4f6550;
+  font-size: 11px;
+  cursor: pointer;
+}
+.answer-confidence .text-button.active,
+.confidence-button.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.confidence-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: #66745f;
+  font-size: 11px;
+}
+.confidence-label {
+  color: var(--muted);
+}
+.confidence-summary {
+  color: var(--warm);
+}
 .study-rail {
   border-left: 1px solid var(--border);
   padding: 3px 0 30px 24px;
@@ -2771,6 +2812,7 @@ progress::-moz-progress-bar {
 }
 .settings-form input,
 .settings-form select,
+.settings-form textarea,
 .note-editor input,
 .note-editor textarea {
   display: block;
@@ -2783,6 +2825,35 @@ progress::-moz-progress-bar {
   margin-top: 7px;
   color: #718563;
   line-height: 1.7;
+}
+.settings-form textarea {
+  resize: vertical;
+  min-height: 72px;
+  font-family: inherit;
+}
+.prompt-viewer {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcf8;
+}
+.prompt-viewer summary {
+  cursor: pointer;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+}
+.prompt-viewer pre {
+  margin: 0;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #4f6550;
 }
 .password-field {
   position: relative;
@@ -3964,6 +4035,7 @@ progress::-moz-progress-bar {
   }
   .settings-form input,
   .settings-form select,
+  .settings-form textarea,
   .note-editor input,
   .note-editor textarea {
     font-size: 16px;

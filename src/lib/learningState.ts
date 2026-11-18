@@ -1,5 +1,6 @@
 import type {
   AssessmentVerdict,
+  ConfidenceLevel,
   EvidenceKind,
   LearningAssessment,
   LearningDetour,
@@ -49,6 +50,7 @@ const verdicts: AssessmentVerdict[] = ["not_assessed", "uncertain", "incorrect",
 const evidenceKinds: ("none" | EvidenceKind)[] = ["none", "recognition", "reasoning", "derivation", "transfer"];
 const questionKinds: QuestionKind[] = ["orientation", "diagnostic", "reasoning", "derivation", "calculation", "transfer", "choice"];
 const masteryLevels: MasteryLevel[] = ["new", "learning", "understood", "applied"];
+const confidenceLevels: ConfidenceLevel[] = ["low", "medium", "high"];
 
 function invalid(detail: string, code = "invalid_protocol"): never {
   throw new LearningProtocolError([{ code, detail }]);
@@ -89,6 +91,9 @@ export function assessment(value: unknown): LearningAssessment {
     questionId: data.questionId === null ? null : text(data.questionId, "assessment.questionId", 150),
     demonstrated: choice(data.demonstrated, evidenceKinds, "assessment.demonstrated"),
     feedback: text(data.feedback, "assessment.feedback", 1500),
+    ...(data.confidence === undefined
+      ? {}
+      : { confidence: choice(data.confidence, confidenceLevels, "assessment.confidence") }),
   };
 }
 

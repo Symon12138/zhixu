@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import { isAttachmentMeta } from "../src/lib/attachments";
-import type { AttachmentImage, ChatRequest, ServerConfig } from "../src/types";
+import type { AttachmentImage, ChatRequest, PhaseEvent, ServerConfig } from "../src/types";
+import { MAX_TEACHING_INSTRUCTIONS } from "../src/types";
 import { isKnowledgeGraph } from "../src/lib/backup";
 import { ApiError, chatCompletion, resolveEnvStatus, validateModelConfig } from "./ai";
+import { getSystemPrompts } from "./tutor";
 import { attachUser, registerAuthRoutes, requireAuth } from "./auth";
 import { LearningProtocolError, parseLearningState } from "./learning";
 import { BookContextError, parseBookContext, parseBookSourceLocation } from "./books";
@@ -20,6 +22,8 @@ import {
   assertAllowedModelEndpoints,
   parseProviderSettings,
   writeErrorResponse,
+  publicErrorPayload,
+  logErrorResponse,
 } from "./http";
 import { UserCredentialStore, registerCredentialRoutes } from "./credentials";
 import { acquireAiConcurrency, enforceQuota } from "./quota";
@@ -262,6 +266,29 @@ export function validateChatRequest(body: unknown): ChatRequest {
     }
     knowledgeGraph = graph;
   }
+  // 追加式教学偏好：只校验形状与长度，不改写内容；控制字符会让提示注入难以审计。
+  let teachingInstructions: string | undefined;
+  if (b.teachingInstructions !== undefined && b.teachingInstructions !== null) {
+    if (typeof b.teachingInstructions !== "string") {
+      throw new ApiError(400, "teachingInstructions 必须是字符串。");
+    }
+    const trimmed = b.teachingInstructions.trim();
+    if (trimmed.length > MAX_TEACHING_INSTRUCTIONS) {
+      throw new ApiError(400, `教学补充偏好过长（${trimmed.length} 字符，上限 ${MAX_TEACHING_INSTRUCTIONS}）。`);
+    }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(trimmed)) {
+      throw new ApiError(400, "教学补充偏好不能包含控制字符。");
+    }
+    teachingInstructions = trimmed || undefined;
+  }
+  // 作答置信度：只有 low/medium/high 三档；它是学习者自报，不是理解证据。
+  let answerConfidence: ChatRequest["answerConfidence"];
+  if (b.answerConfidence !== undefined && b.answerConfidence !== null) {
+    if (b.answerConfidence !== "low" && b.answerConfidence !== "medium" && b.answerConfidence !== "high") {
+      throw new ApiError(400, "answerConfidence 必须是 low、medium 或 high。");
+    }
+    answerConfidence = b.answerConfidence;
+  }
   return {
     settings,
     topic,
@@ -275,6 +302,8 @@ export function validateChatRequest(body: unknown): ChatRequest {
     learningState,
     ...(bookContext ? { bookContext } : {}),
     ...(knowledgeGraph ? { knowledgeGraph } : {}),
+    ...(teachingInstructions ? { teachingInstructions } : {}),
+    ...(answerConfidence ? { answerConfidence } : {}),
   };
 }
 
@@ -375,6 +404,11 @@ export function createApp(options: CreateAppOptions): Express {
       releaseNotes: "https://github.com/Symon12138/zhixu/releases",
       time: Date.now(),
     });
+  });
+
+  // ── GET /api/prompts：只读系统提示全文，便于学习者了解教学约束（不含密钥）──
+  app.get("/api/prompts", (_req, res) => {
+    res.json(getSystemPrompts());
   });
 
   // ── 健康检查：health 只看进程，ready 还要求数据库可用 ───────────────────
@@ -565,6 +599,15 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.post("/api/chat", ...aiAuth, accountBinding(), aiConcurrency, async (req, res) => {
     const client = abortOnClientClose(res);
+    // SSE 模式仅由显式 Accept: text/event-stream 触发；默认仍是单一 JSON 响应。
+    // 认证、校验、配额等前置错误都在设置 SSE 头之前完成，仍走普通 JSON 错误。
+    const wantsStream = typeof req.headers.accept === "string"
+      && req.headers.accept.toLowerCase().includes("text/event-stream");
+    let heartbeat: NodeJS.Timeout | undefined;
+    const sendEvent = (event: string, data: unknown): void => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
     try {
       assertRawProviderKeyPolicy(req, req.body);
       const chatReq = validateChatRequest(req.body);
@@ -580,13 +623,46 @@ export function createApp(options: CreateAppOptions): Express {
       // 本地可预判的配置错误必须先拒绝，不能消耗当日额度。
       validateModelConfig(effective.settings);
       if (!enforceQuota(req, res, db, config.quotas, "chat")) return;
-      const response = await chatCompletion(effective, { signal: client.signal });
-      if (!res.writableEnded && !res.destroyed) res.json(response);
+      if (wantsStream) {
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
+        // 长回合空闲时定期发注释行，避免反向代理把无字节的连接当作超时断开。
+        heartbeat = setInterval(() => {
+          if (!res.writableEnded && !res.destroyed) res.write(": keep-alive\n\n");
+        }, 15_000);
+      }
+      const onPhase: ((event: PhaseEvent) => void) | undefined = wantsStream
+        ? (phase) => sendEvent("phase", phase)
+        : undefined;
+      const response = await chatCompletion(effective, {
+        signal: client.signal,
+        ...(onPhase ? { onPhase } : {}),
+      });
+      if (res.writableEnded || res.destroyed) return;
+      if (wantsStream) {
+        sendEvent("result", response);
+        res.end();
+      } else {
+        res.json(response);
+      }
     } catch (err) {
       // 客户端已断开：不再尝试写任何响应。
       if (client.signal.aborted) return;
-      writeErrorResponse(res, err);
+      if (wantsStream && res.headersSent) {
+        // 响应头已发出，无法再改 HTTP 状态；用同一套公开 payload 发 error 事件。
+        const { status, body } = publicErrorPayload(err);
+        logErrorResponse(res, err, status);
+        sendEvent("error", { status, ...body });
+        res.end();
+      } else {
+        writeErrorResponse(res, err);
+      }
     } finally {
+      clearInterval(heartbeat);
       client.dispose();
     }
   });
@@ -680,6 +756,24 @@ export function createApp(options: CreateAppOptions): Express {
       assertProviderKeyPolicy(req, requested);
       const settings = requireStoredCredentials(req, requested, false);
       if (!(body.topic as string).trim()) throw new ApiError(400, "请先填写诊断主题。");
+      // 可选的图谱先验探测目标：最多 3 条、各自 2000 字符以内；旧客户端不传仍生成固定 3 题。
+      let probeTargets: string[] | undefined;
+      if (body.probeTargets !== undefined && body.probeTargets !== null) {
+        if (!Array.isArray(body.probeTargets) || body.probeTargets.length > 3) {
+          throw new ApiError(400, "probeTargets 必须是最多 3 条的非空数组。");
+        }
+        probeTargets = body.probeTargets.map((item, index) => {
+          if (typeof item !== "string" || !item.trim()) {
+            throw new ApiError(400, `第 ${index + 1} 条先验探测目标必须是非空字符串。`);
+          }
+          const statement = item.trim();
+          if (statement.length > 2000) {
+            throw new ApiError(400, `第 ${index + 1} 条先验探测目标过长（上限 2000 字符）。`);
+          }
+          return statement;
+        });
+        if (probeTargets.length === 0) probeTargets = undefined;
+      }
       validateModelConfig(settings);
       if (!enforceQuota(req, res, db, config.quotas, "diagnostic")) return;
       const result = await generateDiagnostic(
@@ -688,6 +782,7 @@ export function createApp(options: CreateAppOptions): Express {
         body.goal.slice(0, 2000),
         settings,
         client.signal,
+        probeTargets,
       );
       if (!res.writableEnded && !res.destroyed) res.json(result);
     } catch (error) {

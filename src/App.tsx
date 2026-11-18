@@ -18,10 +18,11 @@ import {
   Globe,
   GraduationCap,
   Layers3,
-  Lightbulb,
   LoaderCircle,
+  Lightbulb,
   Menu,
   MessageSquare,
+  Mic,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
@@ -31,6 +32,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Square,
   Sprout,
   Target,
   Trash2,
@@ -75,7 +77,27 @@ import {
 } from "./lib/review";
 import { createDiagnosticProfile, submitDiagnostic } from "./lib/diagnostic";
 import { computePathProgress, describePathProgress } from "./lib/learningPath";
-import { addDependency, emptyGraph, mergeGraphs, upsertProposition } from "./lib/knowledgeGraph";
+import {
+  addDependency,
+  addPropositionsFromNote,
+  deleteProposition,
+  editProposition,
+  emptyGraph,
+  GRAPH_PROPOSITION_LIMIT,
+  mergeGraphs,
+  mergePropositions,
+  priorProbeTargets,
+  upsertProposition,
+} from "./lib/knowledgeGraph";
+import {
+  appendTranscript,
+  createSpeechTranscriber,
+  describeSpeechState,
+  initialSpeechState,
+  resolveSpeechSupport,
+  type SpeechState,
+  type SpeechTranscriber,
+} from "./lib/speech";
 import { recordTransferAnswer, syncTransferQuestion } from "./lib/transfer";
 import { TransferPractice } from "./components/TransferPractice";
 import { DiagnosticPanel } from "./components/DiagnosticPanel";
@@ -124,6 +146,7 @@ import type {
   ChatRequest,
   ChatResponse,
   CloudWorkspace,
+  ConfidenceLevel,
   Course,
   DiagnosticProfile,
   KnowledgeGraph,
@@ -133,6 +156,8 @@ import type {
   LearningTrack,
   Note,
   PathStep,
+  PhaseEvent,
+  PromptBundle,
   ProviderSettings,
   QuizQuestion,
   Reference,
@@ -143,6 +168,8 @@ import type {
   StudyBackup,
   StudySession,
 } from "./types";
+import { CONFIDENCE_LABELS, CONFIDENCE_LEVELS, MAX_TEACHING_INSTRUCTIONS } from "./types";
+import { isEventStream, readChatStream } from "./lib/chatStream";
 
 type LearningStateState = LearningState;
 
@@ -193,6 +220,27 @@ const LAST_USER_KEY = "zhixu.v1.last-user";
 const DELETED_NOTE_IDS_KEY = `${STORAGE_PREFIX}deleted-notes`;
 /** 非敏感设置的版本时间，单独持久化，便于跨设备判断谁更新。 */
 const SETTINGS_UPDATED_AT_KEY = `${STORAGE_PREFIX}settings-updated-at`;
+/** 追加式教学偏好（非敏感），只作为补充约束发给写作导师，不进备份/云同步。 */
+const TEACHING_INSTRUCTIONS_KEY = `${STORAGE_PREFIX}teaching-instructions`;
+
+function readTeachingInstructions(): string {
+  try {
+    const raw = localStorage.getItem(TEACHING_INSTRUCTIONS_KEY);
+    if (!raw) return "";
+    return raw.slice(0, MAX_TEACHING_INSTRUCTIONS);
+  } catch {
+    return "";
+  }
+}
+
+function persistTeachingInstructions(value: string): void {
+  try {
+    if (value) localStorage.setItem(TEACHING_INSTRUCTIONS_KEY, value);
+    else localStorage.removeItem(TEACHING_INSTRUCTIONS_KEY);
+  } catch {
+    // 存储不可用时偏好仍保留在内存中；下次保存会再次尝试。
+  }
+}
 /**
  * 本地学习数据时间戳所基于的时钟偏移。旧版本按设备时钟写入时没有该键，
  * 默认 0；首次合并云端数据时按当前校准值换算一次并写入，此后本地写入
@@ -942,6 +990,17 @@ export default function App() {
   const [settingsUpdatedAt, setSettingsUpdatedAt] = useState<number>(readStoredSettingsUpdatedAt);
   const [bookLocation, setBookLocation] = useState<BookSourceLocation | null>(null);
   const [chatInput, setChatInput] = useState("");
+  /** 本轮作答的自报置信度：只随真实作答发送，不是掌握证据。 */
+  const [answerConfidence, setAnswerConfidence] = useState<ConfidenceLevel | undefined>(undefined);
+  const [speechState, setSpeechState] = useState<SpeechState>(initialSpeechState);
+  const speechRef = useRef<SpeechTranscriber | null>(null);
+  const [speechSupport] = useState(() => resolveSpeechSupport());
+  /** 追加式教学偏好：本地保存，随每次 /api/chat 作为补充约束上传，不进备份。 */
+  const [teachingInstructions, setTeachingInstructions] = useState<string>(readTeachingInstructions);
+  /** GET /api/prompts 返回的系统提示全文，供设置面板只读展示。 */
+  const [systemPrompts, setSystemPrompts] = useState<PromptBundle | null>(null);
+  /** 当前教学回合的真实服务端阶段；null 表示尚未收到任何阶段事件。 */
+  const [teachingPhase, setTeachingPhase] = useState<PhaseEvent | null>(null);
   const [hintCount, setHintCount] = useState(0);
   const [exampleOpen, setExampleOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -1039,6 +1098,27 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
       controller.abort();
+    };
+  }, []);
+  // 系统提示全文只读展示：失败时保持 null，不阻断学习，也不猜测提示内容。
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/prompts", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((value: unknown) => {
+        if (cancelled || !value || typeof value !== "object" || Array.isArray(value)) return;
+        const record = value as Record<string, unknown>;
+        if (
+          typeof record.writer === "string" &&
+          typeof record.review === "string" &&
+          typeof record.bookWriter === "string"
+        ) {
+          setSystemPrompts({ writer: record.writer, review: record.review, bookWriter: record.bookWriter });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -1771,6 +1851,20 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   useEffect(() => () => abortRef.current?.abort(), []);
+  /** 语音转写只把最终文本拼进输入框草稿；任何情况下不自动发送、不占用麦克风到卸载之后。 */
+  useEffect(() => {
+    const transcriber = createSpeechTranscriber({
+      onState: setSpeechState,
+      onFinal: (delta) =>
+        setChatInput((draft) => appendTranscript(draft, delta)),
+    });
+    speechRef.current = transcriber;
+    return () => {
+      transcriber.abort();
+      speechRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (view !== "review") return;
     const frame = requestAnimationFrame(refreshGlobalReviews);
@@ -1880,6 +1974,7 @@ export default function App() {
   function openSession(session: StudySession, nextTab: StudyTab = "lesson") {
     // 草稿属于具体会话：切到另一会话时清空，避免 A 的未发送内容出现在 B。
     setChatInput((draft) => draftForSessionSwitch(activeId, session.id, draft));
+    if (activeId !== session.id) setAnswerConfidence(undefined);
     setActiveId(session.id);
     setTab(nextTab);
     navigate("study");
@@ -2355,7 +2450,7 @@ export default function App() {
     setMobileOpen(false);
     setError(null);
     setBusyId(session.id);
-    setError(null);
+    setTeachingPhase(null);
     if (isNew || (action === "message" && text?.trim() === chatInput.trim()))
       setChatInput("");
     if (isNew) {
@@ -2446,19 +2541,20 @@ export default function App() {
         ...(webSearchOn && !session.bookContext ? { webSearch: true } : {}),
         ...(session.bookContext ? { bookContext: session.bookContext } : {}),
         ...((chosen.apiKey || chosen.searchApiKey) ? { settings: chosen } : {}),
+        ...(teachingInstructions.trim() ? { teachingInstructions: teachingInstructions.trim() } : {}),
+        // 只有真实作答回合才附带自报置信度；continue/hint 等不是作答证据。
+        ...(effectiveAction === "message" && answerConfidence ? { answerConfidence } : {}),
       };
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: writeHeadersForUser(authUserRef.current?.id),
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const value = await response.json().catch(() => {
-        throw new Error("本地学习服务没有返回有效数据，请确认后端正在运行。");
-      });
-      if (!response.ok) {
-        if (response.status === 422 && Array.isArray(value.issues)) {
+      // 本轮已消费该置信度；避免下一条消息误带旧值。
+      if (effectiveAction === "message") setAnswerConfidence(undefined);
+      // JSON 与 SSE error 事件共用一套错误映射，避免两条路径的口径漂移。
+      const chatError = (
+        status: number,
+        value: Record<string, unknown>,
+        retryAfter: string | null,
+      ): Error => {
+        const message = typeof value.error === "string" ? value.error : "";
+        if (status === 422 && Array.isArray(value.issues)) {
           // 质量门槛未通过：本轮没有任何状态被推进，你的问题原样保留，可直接重发。
           const detail = value.issues
             .map((issue: { code?: string; detail?: string }) =>
@@ -2468,28 +2564,51 @@ export default function App() {
             )
             .slice(0, 3)
             .join("；");
-          throw new Error(
+          return new Error(
             `这条回复没有通过教学质检，已放弃发布，学习进度未受影响。原因：${detail || "教学内容不达标"}。可以直接重新发送你的问题。`,
           );
         }
-        if (response.status === 504) {
-          throw new Error(
-            value.error ??
-              "教学回合超时：生成加质检未能在时限内完成，请稍后重试或换用更快的模型。",
+        if (status === 504) {
+          return new Error(
+            message || "教学回合超时：生成加质检未能在时限内完成，请稍后重试或换用更快的模型。",
           );
         }
-        if (response.status === 401) {
-          // 会话过期：回到登录页；重新登录后学习记录仍在。
+        if (status === 401) {
           handleSignedOutRef.current({ notify: true, reason: "登录已过期，请重新登录。" });
-          throw new Error(value.error ?? "登录已过期，请重新登录后再继续。");
+          return new Error(message || "登录已过期，请重新登录后再继续。");
         }
-        if (response.status === 429) {
-          showQuotaNotice(value, response.headers.get("Retry-After"));
-          throw new Error(value.error ?? "今天的对话次数已用完，请明天再试。");
+        if (status === 429) {
+          showQuotaNotice(value, retryAfter);
+          return new Error(message || "今天的对话次数已用完，请明天再试。");
         }
-        throw new Error(value.error ?? "AI 请求失败，请检查模型配置后重试。");
+        return new Error(message || "AI 请求失败，请检查模型配置后重试。");
+      };
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        credentials: "same-origin",
+        // 显式请求阶段流；旧后端忽略 Accept 仍返回 JSON，由 isEventStream 兜底。
+        headers: { ...writeHeadersForUser(authUserRef.current?.id), Accept: "text/event-stream" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      let result: ChatResponse;
+      if (isEventStream(response)) {
+        // 流式读取的是服务端真实阶段（生成/评审/修订/发布），不是逐字讲解正文。
+        const outcome = await readChatStream(response, (phase) => setTeachingPhase(phase));
+        if (outcome.kind === "error") {
+          throw chatError(outcome.status, outcome.body, response.headers.get("Retry-After"));
+        } else if (outcome.kind === "truncated") {
+          throw new Error("教学阶段流在发布讲解前中断，本轮未提交进度，可以重新发送。");
+        } else {
+          result = outcome.response;
+        }
+      } else {
+        const value = await response.json().catch(() => {
+          throw new Error("本地学习服务没有返回有效数据，请确认后端正在运行。");
+        });
+        if (!response.ok) throw chatError(response.status, value, response.headers.get("Retry-After"));
+        result = value as ChatResponse;
       }
-      const result = value as ChatResponse;
       if (typeof result.message !== "string")
         throw new Error("模型返回格式不正确，请重试或切换模型。");
       // 只有通过质量门槛的回复才会发布；学习状态与回执随消息持久化。
@@ -2559,7 +2678,7 @@ export default function App() {
       }
       const message =
         e instanceof Error && e.name === "AbortError"
-          ? "请求已停止或等待超时。你的学习记录已保留，可以重新发送。"
+          ? "已取消本轮教学，未提交任何进度。你的学习记录已保留，可以重新发送。"
           : e instanceof Error
             ? e.message
             : "连接失败，请检查网络和模型配置。";
@@ -2572,6 +2691,7 @@ export default function App() {
       clearTimeout(deadline);
       requestInFlight.current = false;
       setBusyId(null);
+      setTeachingPhase(null);
       abortRef.current = null;
       }
       });
@@ -2789,6 +2909,8 @@ export default function App() {
     setDiagnosticError(null);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 165_000);
+    // 新目标 + 非空图谱：先探测“已理解为前置、尚未应用”的命题；答对也只是可跳过。
+    const probeTargets = priorProbeTargets(graphRef.current).map((proposition) => proposition.statement);
     try {
       const response = await fetch("/api/diagnostic", {
         method: "POST",
@@ -2798,6 +2920,7 @@ export default function App() {
           topic,
           level: diagLevel,
           goal: diagGoal,
+          ...(probeTargets.length ? { probeTargets } : {}),
           ...((chosen.apiKey || chosen.searchApiKey) ? { settings: chosen } : {}),
         }),
         signal: controller.signal,
@@ -2851,6 +2974,12 @@ export default function App() {
       );
       if (validQuestions.length === 0)
         throw new Error("诊断题格式不完整，请重试。");
+      // 探测目标只是待校验数据：createDiagnosticProfile 会逐条验证 questionId 与命题说明。
+      const diagnosticRecord = (diagnostic ?? {}) as Record<string, unknown>;
+      const rawProbeTargets = diagnosticRecord.probeTargets;
+      const savedProbeTargets = Array.isArray(rawProbeTargets)
+        ? (rawProbeTargets as DiagnosticProfile["probeTargets"])
+        : undefined;
       const profile = createDiagnosticProfile(
         {
           topic,
@@ -2858,6 +2987,7 @@ export default function App() {
           questions: validQuestions,
           answers: {},
           submitted: false,
+          ...(savedProbeTargets ? { probeTargets: savedProbeTargets } : {}),
         },
         { now: localNow(), newId: uid },
       );
@@ -2880,7 +3010,7 @@ export default function App() {
 
   function submitDiagnosis(profile: DiagnosticProfile, answers: Record<string, number>) {
     try {
-      const evaluated = submitDiagnostic(profile, answers, localNow());
+      const evaluated = submitDiagnostic(profile, answers, localNow(), profile.confidence);
       changeActive({ diagnostic: evaluated });
       return evaluated;
     } catch (e) {
@@ -4455,7 +4585,11 @@ export default function App() {
                           {busy && (
                             <div className="thinking" role="status">
                               <BrandMark small />
-                              <span>正在生成并检查讲解，必要时会修订一次</span>
+                              <span>
+                                {teachingPhase
+                                  ? teachingPhase.label
+                                  : "正在生成并检查讲解，必要时会修订一次"}
+                              </span>
                               <span className="thinking-dots">
                                 <i />
                                 <i />
@@ -4595,6 +4729,17 @@ export default function App() {
                           onApplyDiagnosticStart={applyDiagnosticStart}
                           onSubmitDiagnostic={submitDiagnosis}
                           onChangeDiagnostic={(profile) => changeActive({ diagnostic: profile })}
+                          onChangeDiagnosticConfidence={(questionId, level) => {
+                            const diagnostic = active.diagnostic;
+                            if (!diagnostic) return;
+                            const confidence = { ...(diagnostic.confidence ?? {}) };
+                            if (level) confidence[questionId] = level;
+                            else delete confidence[questionId];
+                            const next: DiagnosticProfile = { ...diagnostic };
+                            if (Object.keys(confidence).length > 0) next.confidence = confidence;
+                            else delete next.confidence;
+                            changeActive({ diagnostic: next });
+                          }}
                           onRestartDiagnostic={() => void startDiagnostic(active.topic, active.level, sessionGoal(active))}
                           onSetWorkspaceView={setWorkspaceView}
                           onClearTransferError={() => setTransferError(null)}
@@ -4669,6 +4814,25 @@ export default function App() {
                         </button>
                       </div>
                     )}
+                    {!course && active.learningState?.pendingQuestion && (
+                      <div className="answer-confidence" role="group" aria-label="这道题的作答把握">
+                        <span>作答把握</span>
+                        {CONFIDENCE_LEVELS.map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            className={`text-button${answerConfidence === level ? " active" : ""}`}
+                            aria-pressed={answerConfidence === level}
+                            disabled={busyId !== null}
+                            onClick={() =>
+                              setAnswerConfidence((current) => (current === level ? undefined : level))
+                            }
+                          >
+                            {CONFIDENCE_LABELS[level]}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <form className="study-composer" onSubmit={sendMessage}>
                       <label htmlFor="chat-input" className="sr-only">
                         向 AI 导师提问或分享你的理解
@@ -4697,6 +4861,41 @@ export default function App() {
                         }}
                       />
                       <div>
+                        <button
+                          type="button"
+                          className={`icon-button${speechState.status === "listening" || speechState.status === "transcribing" ? " active" : ""}`}
+                          aria-label={
+                            speechState.status === "listening"
+                              ? "停止语音输入"
+                              : "开始语音输入"
+                          }
+                          aria-pressed={speechState.status !== "idle"}
+                          disabled={!speechSupport.supported}
+                          title={
+                            speechSupport.supported
+                              ? "语音输入：转写只填入输入框，不会自动发送"
+                              : speechSupport.reason ?? "当前浏览器不支持语音输入"
+                          }
+                          onClick={() => {
+                            const transcriber = speechRef.current;
+                            if (!transcriber) return;
+                            if (
+                              speechState.status === "listening" ||
+                              speechState.status === "transcribing"
+                            ) {
+                              transcriber.stop();
+                            } else {
+                              transcriber.start();
+                            }
+                          }}
+                        >
+                          {speechState.status === "listening" ||
+                          speechState.status === "transcribing" ? (
+                            <Square size={16} />
+                          ) : (
+                            <Mic size={18} />
+                          )}
+                        </button>
                         <button
                           type="button"
                           className="icon-button"
@@ -4742,6 +4941,19 @@ export default function App() {
                         </button>
                       </div>
                     </form>
+                    {(describeSpeechState(speechState) ||
+                      (!speechSupport.supported && speechSupport.reason) ||
+                      (speechState.interim ? `实时：${speechState.interim}` : "")) && (
+                      <div className="study-composer-note" role="status">
+                        <Mic size={12} aria-hidden="true" />
+                        <span>
+                          {describeSpeechState(speechState) ||
+                            (!speechSupport.supported
+                              ? speechSupport.reason
+                              : `实时：${speechState.interim}`)}
+                        </span>
+                      </div>
+                    )}
                     <ReferencesList
                       items={active.references}
                       onRemove={(index) => {
@@ -5212,6 +5424,44 @@ export default function App() {
                 openSession(target);
               }}
               onStartLearning={() => navigate("home")}
+              onEditProposition={(id, patch) =>
+                setGraph((previous) =>
+                  editProposition(previous, id, patch, localNow()),
+                )
+              }
+              onDeleteProposition={(id) =>
+                setGraph((previous) => deleteProposition(previous, id))
+              }
+              onMergePropositions={(keepId, mergeId) =>
+                setGraph((previous) =>
+                  mergePropositions(previous, keepId, mergeId, localNow()),
+                )
+              }
+              notes={notes}
+              onImportFromNote={(noteId, statements) => {
+                const note = notes.find((item) => item.id === noteId);
+                if (!note) return;
+                const result = addPropositionsFromNote(
+                  graphRef.current,
+                  note,
+                  statements,
+                  localNow(),
+                );
+                if (result.added > 0) {
+                  setGraph(result.graph);
+                  notify(
+                    result.rejected > 0
+                      ? `已加入 ${result.added} 条待核验概念；图谱达 ${GRAPH_PROPOSITION_LIMIT} 条上限，${result.rejected} 条未加入。请先删除或合并，或导出备份后再继续。`
+                      : `已加入 ${result.added} 条待核验概念。它们还不是已掌握，需要独立核验。`,
+                  );
+                } else if (result.duplicates > 0 && result.rejected === 0) {
+                  notify("选中的概念都已存在或已删除，没有重复写入。");
+                } else if (result.rejected > 0) {
+                  notify(
+                    `图谱已达 ${GRAPH_PROPOSITION_LIMIT} 条上限，${result.rejected} 条未加入。请先删除或合并，或导出备份后再继续。`,
+                  );
+                }
+              }}
             />
           )}
         </main>
@@ -5405,6 +5655,13 @@ export default function App() {
                 }
               : undefined
           }
+          teachingInstructions={teachingInstructions}
+          onTeachingInstructionsChange={(value) => {
+            const next = value.slice(0, MAX_TEACHING_INSTRUCTIONS);
+            setTeachingInstructions(next);
+            persistTeachingInstructions(next);
+          }}
+          systemPrompts={systemPrompts}
           onSave={(value) => {
             const nextValue = canUsePersonalKeys ? value : clearPersonalKeys(value);
             const savingUserId = authUser?.id ?? null;
@@ -5743,6 +6000,8 @@ interface WorkspacePanelsProps {
     answers: Record<string, number>,
   ) => DiagnosticProfile | null;
   onChangeDiagnostic: (profile: DiagnosticProfile) => void;
+  /** 记录某题的自报置信度；undefined 表示取消该题记录。 */
+  onChangeDiagnosticConfidence: (questionId: string, level: ConfidenceLevel | undefined) => void;
   onRestartDiagnostic: () => void;
   onSetWorkspaceView: (view: WorkspaceSubView) => void;
   onClearTransferError: () => void;
@@ -5754,7 +6013,7 @@ interface WorkspacePanelsProps {
   onExplainReview: (item: ReviewItem) => Promise<string>;
 }
 
-function WorkspacePanels({ session, course, workspaceView, busy, transferBusy, transferError, reviewExplainBusy, diagnosticBusy, diagnosticError, onClearDiagnosticError, onEnterStep, onFocusChatInput, onNotify, onApplyDiagnosticStart, onSubmitDiagnostic, onChangeDiagnostic, onRestartDiagnostic, onSetWorkspaceView, onClearTransferError, reviewedTransferId, onSubmitTransfer, onRequestTransferQuestion, onRateReview, onOpenReviewTopic, onExplainReview }: WorkspacePanelsProps) {
+function WorkspacePanels({ session, course, workspaceView, busy, transferBusy, transferError, reviewExplainBusy, diagnosticBusy, diagnosticError, onClearDiagnosticError, onEnterStep, onFocusChatInput, onNotify, onApplyDiagnosticStart, onSubmitDiagnostic, onChangeDiagnostic, onChangeDiagnosticConfidence, onRestartDiagnostic, onSetWorkspaceView, onClearTransferError, reviewedTransferId, onSubmitTransfer, onRequestTransferQuestion, onRateReview, onOpenReviewTopic, onExplainReview }: WorkspacePanelsProps) {
   const pathSteps = course ? coursePathSteps(course.stages, session.completedStages, session.stageIndex) : session.learningState ? learningStatePathSteps(session.learningState) : [];
   const requested = pathSteps.find(step => step.id === (course ? course.stages[session.stageIndex]?.id : session.learningState?.currentStepId));
   const progress = pathSteps.length ? computePathProgress(pathSteps, pathSteps.filter(step => step.status === "done").map(step => step.id), requested?.status === "done" ? null : requested?.id) : null;
@@ -5764,7 +6023,7 @@ function WorkspacePanels({ session, course, workspaceView, busy, transferBusy, t
   if (workspaceView === "path") return <div className="ws-path-view">
     {diagnosticError && <ErrorBox message={diagnosticError} onClose={onClearDiagnosticError} />}
     {diagnostic && <>
-      <DiagnosticPanel profile={diagnostic} busy={busy || diagnosticBusy} onChange={answers => onChangeDiagnostic({ ...diagnostic, answers })} onSubmit={() => { onSubmitDiagnostic(diagnostic, diagnostic.answers); }} onRestart={onRestartDiagnostic} />
+      <DiagnosticPanel profile={diagnostic} busy={busy || diagnosticBusy} confidence={diagnostic.confidence} onChange={answers => onChangeDiagnostic({ ...diagnostic, answers })} onConfidenceChange={onChangeDiagnosticConfidence} onSubmit={() => { onSubmitDiagnostic(diagnostic, diagnostic.answers); }} onRestart={onRestartDiagnostic} />
       {diagnostic.submitted && <button type="button" className="button secondary" disabled={busy && !course} onClick={() => onApplyDiagnosticStart(diagnostic)}>{course ? "回到推荐小节" : "从推荐起点开始学习"}<ArrowRight size={15} /></button>}
     </>}
     {progress ? <>

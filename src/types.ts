@@ -159,7 +159,41 @@ export interface ChatRequest {
    * 规划新路线时也在其上追加依赖边。旧客户端不传仍合法。
    */
   knowledgeGraph?: KnowledgeGraph;
+  /**
+   * 学习者追加的教学偏好：只作为补充约束拼接在写作导师提示后面，
+   * 不替换核心协议、不改独立评审、不关闭答案保护。旧客户端不传仍合法。
+   */
+  teachingInstructions?: string;
+  /**
+   * 学习者对自己本轮作答的置信度自报。它不是理解证据：高置信答错必须修复，
+   * 低置信答对不能据此跳过前置。旧客户端不传仍合法。
+   */
+  answerConfidence?: ConfidenceLevel;
 }
+
+/** 教学回合的真实阶段（由服务端在模型调用边界发出，不是客户端计时器伪进度）。 */
+export type TeachingPhase =
+  | "search"
+  | "draft"
+  | "review"
+  | "repair"
+  | "publish";
+
+/** SSE 阶段事件载荷：phase 是稳定类别，label 是给用户看的中文说明。 */
+export interface PhaseEvent {
+  phase: TeachingPhase;
+  label: string;
+}
+
+/** GET /api/prompts 返回的三套系统提示全文（只读，不含密钥）。 */
+export interface PromptBundle {
+  writer: string;
+  review: string;
+  bookWriter: string;
+}
+
+/** 教学偏好追加段的最大字符数；服务端校验与前端输入共用同一个值。 */
+export const MAX_TEACHING_INSTRUCTIONS = 2000;
 
 /** 随请求直传的图片附件（dataURL 形态）。 */
 export interface AttachmentImage {
@@ -313,6 +347,17 @@ export interface DiagnosticProfile {
   evidenceSummary: string[];
   weakConcepts: string[];
   skippedConcepts: string[];
+  /** 逐题置信度自报（题 id → 低/中/高）；旧诊断没有该字段。 */
+  confidence?: Record<string, ConfidenceLevel>;
+  /** 提交时统计：已作答且自报高置信、但答错的题数。自报不是理解证据。 */
+  highConfidenceErrors?: number;
+  /** 提交时带有置信度记录的题数；0 或缺省表示本轮未使用置信度。 */
+  confidenceRecorded?: number;
+  /**
+   * 先验探测目标：来自知识图谱中“作为前置、但尚未应用”的命题。
+   * 每题最多对应一条目标；答对只表示可跳过该前置，仍需独立推理核验。
+   */
+  probeTargets?: { questionId: string; statement: string }[];
 }
 
 export interface PathStep {
@@ -444,12 +489,25 @@ export interface LearningQuestion {
   scope: "main" | "detour";
 }
 
+/** 学习者对作答的置信度自报；不是理解证据，不能单凭它认证掌握。 */
+export type ConfidenceLevel = "low" | "medium" | "high";
+
+/** 置信度展示顺序与中文文案：诊断面板与作答输入区共用，避免两处漂移。 */
+export const CONFIDENCE_LEVELS: ConfidenceLevel[] = ["low", "medium", "high"];
+export const CONFIDENCE_LABELS: Record<ConfidenceLevel, string> = {
+  low: "不太确定",
+  medium: "有把握",
+  high: "很确定",
+};
+
 export interface LearningAssessment {
   verdict: AssessmentVerdict;
   evidenceQuote: string;
   questionId: string | null;
   demonstrated: "none" | EvidenceKind;
   feedback: string;
+  /** 学习者自报置信度；旧评估没有该字段。 */
+  confidence?: ConfidenceLevel;
 }
 
 export interface LearningMisconception {
@@ -568,8 +626,14 @@ export interface KnowledgeProposition {
   sourceSessionId: string;
   /** 最近一次核验时间（LWW 合并依据）。 */
   verifiedAt: number;
-  /** 核验强度：understood=能复述/辨认，applied=能独立应用/迁移。 */
-  strength: "understood" | "applied";
+  /**
+   * 核验强度：
+   * - noted=从笔记导入的待核验条目（用户确认值得跟踪，但没有理解证据，不计入掌握）；
+   * - understood=能复述/辨认；applied=能独立应用/迁移。
+   */
+  strength: "noted" | "understood" | "applied";
+  /** 从笔记导入时的来源笔记 id；会话沉淀的命题没有该字段。 */
+  sourceNoteId?: string;
   /** 支撑证据（来自会话的真实作答引文，可回溯）。 */
   evidence: LearningEvidence[];
 }
@@ -600,10 +664,14 @@ export interface StepClaim {
   statement: string;
 }
 
-/** 知识图谱快照：命题 + 依赖，随工作区同步与备份。 */
 export interface KnowledgeGraph {
   propositions: KnowledgeProposition[];
   dependencies: KnowledgeDependency[];
+  /**
+   * 显式删除的命题 id 墓碑（旧数据/旧备份缺省为空）。
+   * 跨设备/备份合并时取并集并过滤命题，避免旧副本让已删节点复活。
+   */
+  deletedPropositionIds?: string[];
 }
 
 /* ── C3 后台研究任务（单节点内存，不持久化，进程重启即丢失） ─────────── */

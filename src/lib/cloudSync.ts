@@ -677,6 +677,11 @@ export function shiftLocalWorkspaceClock(
               ...dependency,
               createdAt: dependency.createdAt + offset,
             })),
+            // 墓碑与删除时间不随时钟偏移调整：它们只在本地合并时生成，
+            // 且必须原样传播到云端，否则旧副本会把已删命题重新带上。
+            ...(local.knowledgeGraph.deletedPropositionIds
+              ? { deletedPropositionIds: [...local.knowledgeGraph.deletedPropositionIds] }
+              : {}),
           },
         }),
     ...(local.settingsUpdatedAt === undefined
@@ -829,6 +834,9 @@ function snapshotGraph(graph: KnowledgeGraph | undefined): unknown {
       sourceSessionId: proposition.sourceSessionId,
       verifiedAt: proposition.verifiedAt,
       strength: proposition.strength,
+      ...(proposition.sourceNoteId === undefined
+        ? {}
+        : { sourceNoteId: proposition.sourceNoteId }),
       evidence: proposition.evidence
         .map((item) => ({
           quote: item.quote,
@@ -862,7 +870,8 @@ function snapshotGraph(graph: KnowledgeGraph | undefined): unknown {
         `${b.fromId}::${b.toId}::${b.createdAt}`,
       ),
     );
-  return { propositions, dependencies };
+  const deletedPropositionIds = [...new Set(graph?.deletedPropositionIds ?? [])].sort();
+  return { propositions, dependencies, deletedPropositionIds };
 }
 
 function compareText(a: string, b: string): number {

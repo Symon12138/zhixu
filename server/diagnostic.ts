@@ -5,21 +5,37 @@ import { ApiError, chatCompletion } from "./ai";
 export const DIAGNOSTIC_QUESTION_COUNT = 3;
 
 /**
- * 严格按模型给出的顺序取前 3 题：不随机、不重排、不改写题面或 correctIndex，
- * 以免诊断的正确项与解析错位。
+ * 严格按模型给出的顺序取前 count 题：不随机、不重排、不改写题面或 correctIndex，
+ * 以免诊断的正确项与解析错位。count 缺省为固定 3 题；带先验探测目标时按目标数收缩。
  */
-export function selectDiagnosticQuestions(quiz: QuizQuestion[]): QuizQuestion[] {
-  return quiz.slice(0, DIAGNOSTIC_QUESTION_COUNT);
+export function selectDiagnosticQuestions(quiz: QuizQuestion[], count = DIAGNOSTIC_QUESTION_COUNT): QuizQuestion[] {
+  return quiz.slice(0, count);
 }
 
+/**
+ * 生成学习前诊断。
+ * - 无先验目标：固定 3 题，覆盖必要前置、核心机制、情境应用；
+ * - 带先验目标（来自知识图谱里“已理解为前置、尚未应用”的命题）：
+ *   生成 min(3, 目标数) 题，逐题对应一条目标，并回传 questionId → 命题映射。
+ * 答对只表示“可跳过该前置”，仍需独立推理核验，不能据此认证掌握。
+ */
 export async function generateDiagnostic(
   topic: string,
   level: string,
   goal: string,
   settings?: ProviderSettings,
   signal?: AbortSignal,
-): Promise<{ diagnostic: Omit<DiagnosticProfile, "id" | "answers" | "submitted" | "evaluatedAt" | "recommendedStepIndex" | "evidenceSummary" | "weakConcepts" | "skippedConcepts">; quality: ChatResponse["quality"] }> {
+  probeTargets?: string[],
+): Promise<{
+  diagnostic: Omit<DiagnosticProfile, "id" | "answers" | "submitted" | "evaluatedAt" | "recommendedStepIndex" | "evidenceSummary" | "weakConcepts" | "skippedConcepts" | "confidence" | "highConfidenceErrors" | "confidenceRecorded">;
+  quality: ChatResponse["quality"];
+}> {
   if (!topic.trim()) throw new ApiError(400, "请先填写诊断主题。");
+  const targets = (probeTargets ?? []).map((item) => item.trim()).filter(Boolean).slice(0, DIAGNOSTIC_QUESTION_COUNT);
+  const count = targets.length > 0 ? targets.length : DIAGNOSTIC_QUESTION_COUNT;
+  const instruction = targets.length > 0
+    ? `为零基础或已有基础学习者设计恰好${count}道学习前探测选择题，只用于判断是否已具备下列前置概念，不用于认证已经掌握。\n需要逐个探测的前置命题（顺序对应题目顺序，一题只测一条）：\n${targets.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+    : `为零基础或已有基础学习者设计恰好${count}道学习前诊断选择题，用于安排起点，不用于认证已经掌握。覆盖：一个必要前置概念、一个核心机制、一个不同情境的初步应用。`;
   const request: ChatRequest = {
     topic: `学习前诊断：${topic}`,
     level,
@@ -27,16 +43,24 @@ export async function generateDiagnostic(
     action: "quiz",
     messages: [{
       role: "user",
-      content: `为零基础或已有基础学习者设计恰好3道学习前诊断选择题，用于安排起点，不用于认证已经掌握。覆盖：一个必要前置概念、一个核心机制、一个不同情境的初步应用。每题选项2-4个，提供正确答案、提示与解析；题面不得直接写出答案。不要假定学习者自评能力。主题：${topic}。期望能力：${goal || level}。`,
+      content: `${instruction}\n每题选项2-4个，提供正确答案、提示与解析；题面不得直接写出答案，也不要暗示结论。不要假定学习者自评能力。主题：${topic}。期望能力：${goal || level}。`,
     }],
     settings,
   };
   const result = await chatCompletion(request, { signal });
-  if (!result.quiz || result.quiz.length < DIAGNOSTIC_QUESTION_COUNT) {
+  if (!result.quiz || result.quiz.length < count) {
     throw new ApiError(502, "诊断题未生成，请重试。");
   }
+  const questions = selectDiagnosticQuestions(result.quiz, count);
   return {
-    diagnostic: { topic, level, questions: selectDiagnosticQuestions(result.quiz) },
+    diagnostic: {
+      topic,
+      level,
+      questions,
+      ...(targets.length
+        ? { probeTargets: targets.map((statement, index) => ({ questionId: questions[index].id, statement })) }
+        : {}),
+    },
     quality: result.quality,
   };
 }

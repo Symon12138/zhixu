@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useState, type FormEvent } from "react";
 import {
   ArrowRight,
   BookOpen,
@@ -6,12 +6,16 @@ import {
   GitBranch,
   Layers3,
   Network,
+  Pencil,
   Quote,
+  Trash2,
 } from "lucide-react";
 import type {
   KnowledgeGraph,
   KnowledgeProposition,
+  Note,
 } from "../types";
+import { noteCandidateStatements } from "../lib/knowledgeGraph";
 import { evidenceKindLabels } from "./LearningProgress";
 import "./KnowledgeGraphView.css";
 
@@ -23,11 +27,13 @@ const KG_ROW_GAP = 18;
 const KG_PADDING = 22;
 
 const strengthLabels: Record<KnowledgeProposition["strength"], string> = {
+  noted: "待核验",
   understood: "已理解",
   applied: "已应用",
 };
 
 const strengthHints: Record<KnowledgeProposition["strength"], string> = {
+  noted: "从笔记导入，仅表示值得跟踪，没有理解证据",
   understood: "能复述或辨认",
   applied: "能独立应用或迁移",
 };
@@ -46,6 +52,19 @@ export interface KnowledgeGraphViewProps {
   onOpenSession?: (sessionId: string) => void;
   /** 空态下回到学习入口。 */
   onStartLearning?: () => void;
+  /** 编辑命题内容/主题；回调负责按新内容重算 id、重连依赖并记录墓碑。 */
+  onEditProposition?: (
+    id: string,
+    patch: { statement: string; topic: string },
+  ) => void;
+  /** 删除命题；回调负责移除节点、关联边并记录墓碑。 */
+  onDeleteProposition?: (id: string) => void;
+  /** 把 mergeId 这条重复命题并入 keepId（证据并入、边重连、mergeId 记墓碑）。 */
+  onMergePropositions?: (keepId: string, mergeId: string) => void;
+  /** 可导入的笔记；省略时不渲染笔记导入入口。 */
+  notes?: readonly Note[];
+  /** 用户确认后的笔记语句；回调负责写入 noted 节点、容量上限与提示。 */
+  onImportFromNote?: (noteId: string, statements: string[]) => void;
 }
 
 export interface TopicGroup {
@@ -289,13 +308,89 @@ function SourceSessionLink({
   );
 }
 
+/** 合并候选：同主题优先，其余按命题文字排序，排除当前节点。 */
+export function listMergeCandidates(
+  propositions: readonly KnowledgeProposition[],
+  selected: KnowledgeProposition,
+): KnowledgeProposition[] {
+  const topic = selected.topic.trim();
+  return propositions
+    .filter((proposition) => proposition.id !== selected.id)
+    .sort((a, b) => {
+      const aSame = a.topic.trim() === topic ? 0 : 1;
+      const bSame = b.topic.trim() === topic ? 0 : 1;
+      return aSame - bSame || a.statement.localeCompare(b.statement, "zh-Hans-CN");
+    });
+}
+
+function PropositionEditor({
+  proposition,
+  onEditProposition,
+}: {
+  proposition: KnowledgeProposition;
+  onEditProposition: NonNullable<KnowledgeGraphViewProps["onEditProposition"]>;
+}) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const statement = String(data.get("statement") ?? "").trim();
+    if (!statement) return;
+    const topic = String(data.get("topic") ?? "").trim();
+    onEditProposition(proposition.id, { statement, topic });
+    const disclosure = event.currentTarget.closest("details");
+    if (disclosure) disclosure.open = false;
+  }
+  return (
+    <form className="kg-edit-form" onSubmit={handleSubmit}>
+      <label>
+        命题内容
+        <textarea
+          name="statement"
+          defaultValue={proposition.statement}
+          rows={3}
+          maxLength={240}
+          required
+        />
+      </label>
+      <label>
+        主题
+        <input name="topic" defaultValue={proposition.topic} maxLength={40} />
+      </label>
+      <div className="kg-edit-actions">
+        <button type="submit" className="button primary">
+          保存修改
+        </button>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={(event) => {
+            const form = event.currentTarget.closest("form");
+            if (form) form.reset();
+            const disclosure = form?.closest("details");
+            if (disclosure) disclosure.open = false;
+          }}
+        >
+          取消
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export function KnowledgeGraphView({
   graph,
   sessions = [],
   onOpenSession,
   onStartLearning,
+  onEditProposition,
+  onDeleteProposition,
+  onMergePropositions,
+  notes = [],
+  onImportFromNote,
 }: KnowledgeGraphViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [importNoteId, setImportNoteId] = useState<string>("");
+  const [importChosen, setImportChosen] = useState<string[]>([]);
   const layout = useMemo(() => computeKnowledgeGraphLayout(graph), [graph]);
   const groups = useMemo(
     () => groupPropositionsByTopic(graph.propositions),
@@ -329,12 +424,30 @@ export function KnowledgeGraphView({
   const selected =
     (selectedId ? propositionById.get(selectedId) : undefined) ??
     orderedPropositions[0];
+  const canManage = Boolean(
+    onEditProposition && onDeleteProposition && onMergePropositions,
+  );
+  const mergeCandidates = useMemo(
+    () =>
+      selected
+        ? listMergeCandidates(graph.propositions, selected)
+        : [],
+    [graph.propositions, selected],
+  );
   const appliedCount = graph.propositions.filter(
     (proposition) => proposition.strength === "applied",
   ).length;
   const markerId = `kg-arrow-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const titleId = `${markerId}-title`;
   const hasDependencies = layout.edges.length > 0;
+  const importNote = importNoteId
+    ? notes.find((note) => note.id === importNoteId)
+    : undefined;
+  const importCandidates = useMemo(
+    () => (importNote ? noteCandidateStatements(importNote) : []),
+    [importNote],
+  );
+  const importFieldId = `${markerId}-import`;
 
   const prerequisiteEdges = selected
     ? layout.edges.filter((edge) => edge.toId === selected.id)
@@ -379,6 +492,77 @@ export function KnowledgeGraphView({
           </div>
         )}
       </header>
+
+      {onImportFromNote && notes.length > 0 && (
+        <details className="kg-import">
+          <summary>
+            <BookOpen size={14} aria-hidden="true" />
+            从笔记导入待核验概念
+          </summary>
+          <p className="kg-import-help">
+            只把你确认的句子标记为“待核验”，不会自动算作已理解或已掌握；需要之后再独立核验。
+          </p>
+          <label htmlFor={importFieldId}>选择笔记</label>
+          <select
+            id={importFieldId}
+            value={importNoteId}
+            onChange={(event) => {
+              setImportNoteId(event.target.value);
+              setImportChosen([]);
+            }}
+          >
+            <option value="">选择一条笔记…</option>
+            {notes.map((note) => (
+              <option key={note.id} value={note.id}>
+                {note.title.trim() || note.content.slice(0, 24)}
+              </option>
+            ))}
+          </select>
+          {importNote && (
+            importCandidates.length === 0 ? (
+              <p className="kg-import-help">这条笔记没有可拆分的短句。</p>
+            ) : (
+              <>
+                <ul className="kg-import-list">
+                  {importCandidates.map((statement) => {
+                    const checked = importChosen.includes(statement);
+                    return (
+                      <li key={statement}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              setImportChosen((current) =>
+                                checked
+                                  ? current.filter((item) => item !== statement)
+                                  : [...current, statement],
+                              )
+                            }
+                          />
+                          <span>{statement}</span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={importChosen.length === 0}
+                  onClick={() => {
+                    if (!importNote) return;
+                    onImportFromNote(importNote.id, importChosen);
+                    setImportChosen([]);
+                  }}
+                >
+                  加入图谱（{importChosen.length}）
+                </button>
+              </>
+            )
+          )}
+        </details>
+      )}
 
       {graph.propositions.length === 0 ? (
         <div className="kg-empty empty-state">
@@ -643,6 +827,66 @@ export function KnowledgeGraphView({
                     onOpenSession={onOpenSession}
                   />
                 </div>
+
+                {canManage && (
+                  <section className="kg-manage">
+                    <details className="kg-manage-edit">
+                      <summary>
+                        <Pencil size={12} aria-hidden="true" />
+                        编辑这条命题
+                      </summary>
+                      <PropositionEditor
+                        proposition={selected}
+                        onEditProposition={onEditProposition!}
+                      />
+                    </details>
+                    {mergeCandidates.length > 0 && (
+                      <form
+                        className="kg-merge-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const data = new FormData(event.currentTarget);
+                          const keepId = String(data.get("keepId") ?? "");
+                          if (!keepId || keepId === selected.id) return;
+                          onMergePropositions!(keepId, selected.id);
+                        }}
+                      >
+                        <label htmlFor="kg-merge-target">合并重复命题</label>
+                        <select id="kg-merge-target" name="keepId" defaultValue="">
+                          <option value="" disabled>
+                            选择要保留的命题…
+                          </option>
+                          {mergeCandidates.map((candidate) => (
+                            <option key={candidate.id} value={candidate.id}>
+                              {candidate.topic || "未分类"} · {candidate.statement}
+                            </option>
+                          ))}
+                        </select>
+                        <button type="submit" className="button secondary">
+                          并入所选命题
+                        </button>
+                        <small>当前命题的证据与依赖会并入所选命题，当前节点被移除。</small>
+                      </form>
+                    )}
+                    <button
+                      type="button"
+                      className="text-button kg-delete-button"
+                      onClick={() => {
+                        if (
+                          typeof window === "undefined" ||
+                          window.confirm(
+                            `删除「${selected.statement}」？该命题与关联依赖会被移除，且不会在旧备份或另一台设备上复活。`,
+                          )
+                        ) {
+                          onDeleteProposition!(selected.id);
+                        }
+                      }}
+                    >
+                      <Trash2 size={12} aria-hidden="true" />
+                      删除这条命题
+                    </button>
+                  </section>
+                )}
 
                 <section className="kg-detail-section">
                   <h3>

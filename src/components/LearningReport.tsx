@@ -22,6 +22,7 @@ import type {
   ReviewItem,
 } from "../types";
 import { evidenceKindLabels, masteryLabels } from "./LearningProgress";
+import { highConfidenceErrorRatio } from "../lib/diagnostic";
 import "./LearningWorkspace.css";
 
 export interface LearningReportProps {
@@ -119,11 +120,15 @@ function buildUnverified(
   }
   if (diagnostic && diagnostic.submitted) {
     const weak = diagnostic.weakConcepts.join("、");
+    const confidenceRecorded = diagnostic.confidenceRecorded ?? 0;
+    const confidenceNote =
+      confidenceRecorded > 0
+        ? `自报置信度的 ${confidenceRecorded} 道题里有 ${diagnostic.highConfidenceErrors ?? 0} 道“很确定却答错”（${Math.round(highConfidenceErrorRatio(diagnostic) * 100)}%），这些会优先原地修复，不能直接推进。`
+        : "本轮没有记录作答置信度，无法判断哪些错误属于“很确定却答错”。";
     entries.push({
       id: `diagnostic-${diagnostic.id}`,
       title: `诊断画像：${diagnostic.topic}（${diagnostic.level}）`,
-      detail:
-        "诊断选择题只反映识别起点，答对不等于会推理；它用来决定从哪里开始，不直接证明掌握。",
+      detail: `诊断选择题只反映识别起点，答对不等于会推理；它用来决定从哪里开始，不直接证明掌握。${confidenceNote}`,
       whatWouldVerify: weak
         ? `识别出的薄弱概念：${weak}。进入对应微课并通过迁移题后才会核验。`
         : "进入推荐步骤并通过推理或迁移题后才会核验。",

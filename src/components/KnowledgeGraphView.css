@@ -521,6 +521,77 @@
   font-size: 12px;
 }
 
+.kg-manage {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e8df;
+  display: grid;
+  gap: 12px;
+}
+.kg-manage-edit > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #4f6040;
+  list-style: none;
+}
+.kg-manage-edit > summary::-webkit-details-marker {
+  display: none;
+}
+.kg-edit-form,
+.kg-merge-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #e5e8df;
+  border-radius: 10px;
+  background: #fbfcf8;
+}
+.kg-edit-form label,
+.kg-merge-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #5c6750;
+}
+.kg-edit-form textarea,
+.kg-edit-form input,
+.kg-merge-form select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #dfe5d6);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+}
+.kg-edit-form textarea {
+  resize: vertical;
+  min-height: 68px;
+}
+.kg-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+.kg-edit-actions .button,
+.kg-merge-form .button {
+  font-size: 11.5px;
+  padding: 7px 12px;
+}
+.kg-merge-form small {
+  color: #727b6c;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+.kg-delete-button {
+  justify-self: start;
+  color: var(--error, #b42318);
+}
 @media (max-width: 1120px) {
   .kg-layout {
     grid-template-columns: 1fr;
@@ -571,4 +642,81 @@
   .kg-prop {
     transition: none;
   }
+}
+
+/* 待核验（noted）：来自笔记、尚无理解证据，与已理解/已应用明显区分。 */
+.kg-node-accent.noted {
+  fill: #b9c4d2;
+}
+.kg-node-strength.noted {
+  fill: #6b7789;
+}
+.kg-badge.noted {
+  background: #eef1f5;
+  color: #5c6878;
+}
+
+/* 从笔记导入：确定性候选 + 逐条确认，不承诺自动抽取质量。 */
+.kg-import {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  padding: 14px 18px;
+  margin-bottom: 18px;
+}
+.kg-import > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+}
+.kg-import[open] > summary {
+  margin-bottom: 10px;
+}
+.kg-import-help {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.9;
+  color: #66745f;
+}
+.kg-import label {
+  display: block;
+  font-size: 12px;
+  color: #4f6550;
+}
+.kg-import select {
+  display: block;
+  width: 100%;
+  margin: 7px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  color: #3f4b3a;
+}
+.kg-import-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.kg-import-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #3f4b3a;
+}
+.kg-import-list input {
+  margin-top: 3px;
+  flex: none;
 }

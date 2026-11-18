@@ -862,6 +862,16 @@ export function checkTutorDraft(
       "missing_misconception",
       "错误或部分正确必须记录本轮具体误区，以便后续针对性核验",
     );
+  // T5：高置信错误代表稳定的错误模型，必须原地修复；不能先推进或换话题。
+  if (
+    request.answerConfidence === "high" &&
+    (result.verdict === "incorrect" || result.verdict === "partial") &&
+    (directive.navigation.kind !== "stay" || !directive.misconception)
+  )
+    issue(
+      "high_confidence_error_requires_repair",
+      "高置信错误必须停留在当前点、记录具体误区并进入修复，不能推进或换话题",
+    );
   if (
     (request.action === "hint" || request.action === "example") &&
     (graded || directive.navigation.kind !== "stay")
